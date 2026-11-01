@@ -19,6 +19,8 @@ import os
 import seaborn as sns
 import pandas as pd
 import numpy as np
+# LNR testset
+from LNR_Sequences import LNR_Sequences as LNR_SEQUENCES
 
 # Protein sequence dictionary
 PROTEIN_SEQUENCES = {
@@ -242,15 +244,15 @@ def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, pro
     
     paretoFront = mcts.forward(rootNode)
     
-    output_log_path = f'{config.base_path}/{prot_name1}/log_{filename}.csv'
+    output_log_path = f'{config.base_path}/results/{prot_name1}/log_{filename}.csv'
     save_logs_to_file(config, mcts.valid_fraction_log, mcts.score_logs, output_log_path)
 
     plot_data(mcts.valid_fraction_log, 
-            save_path=f'{config.base_path}/{prot_name1}/valid_{filename}.png')
+            save_path=f'{config.base_path}/results/{prot_name1}/valid_{filename}.png')
     
     for name in mcts.score_func_names:
         plot_data_with_distribution_seaborn(log1=mcts.score_logs[name],
-                save_path=f'{config.base_path}/{prot_name1}/{name}_{filename}.png',
+                save_path=f'{config.base_path}/results/{prot_name1}/{name}_{filename}.png',
                 label1=f"Average {name}",
                 title=f"Average {name} Over Iterations")
     
@@ -272,7 +274,7 @@ def main(config):
     tokenizer = SMILES_SPE_Tokenizer(f'{config.base_path}/src/tokenizer/new_vocab.txt', 
                                     f'{config.base_path}/src/tokenizer/new_splits.txt')
    
-    mdlm = Diffusion.load_from_checkpoint(config.eval.checkpoint_path, config=config, tokenizer=tokenizer, strict=False)
+    mdlm = Diffusion.load_from_checkpoint(config.eval.checkpoint_path, config=config, tokenizer=tokenizer, strict=False, map_location='cpu', weights_only=False)
     
     mdlm.eval()
     device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
@@ -283,8 +285,8 @@ def main(config):
     analyzer = PeptideAnalyzer()
     
     # Look up protein sequences from names
-    prot_seq1 = PROTEIN_SEQUENCES.get(prot_name1.lower())
-    prot_seq2 = PROTEIN_SEQUENCES.get(prot_name2.lower()) if prot_name2 else None
+    prot_seq1 = PROTEIN_SEQUENCES.get(prot_name1.lower(), LNR_SEQUENCES.get(prot_name1.lower()))
+    prot_seq2 = PROTEIN_SEQUENCES.get(prot_name2.lower(), LNR_SEQUENCES.get(prot_name2.lower())) if prot_name2 else None
     
     if prot_seq1 is None:
         raise ValueError(f"Protein '{prot_name1}' not found in PROTEIN_SEQUENCES dictionary. Available proteins: {list(PROTEIN_SEQUENCES.keys())}")
@@ -341,7 +343,7 @@ def main(config):
     else: 
         df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling'])
 
-    df.to_csv(f'{config.base_path}/{prot_name1}/{filename}.csv', index=False)
+    df.to_csv(f'{config.base_path}/results/{prot_name1}/{filename}.csv', index=False)
 
     # ── timing ──
     elapsed = time.time() - t_start

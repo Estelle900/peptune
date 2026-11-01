@@ -1,1 +1,8 @@
 logs/
+results/
+quickstart_results/
+uvcache/
+data/
+checkpoints/
+**/*.pt
+**/*.log

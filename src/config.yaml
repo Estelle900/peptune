@@ -4,7 +4,7 @@ noise:
   sigma_max: 20
   state_dependent: True
 
-base_path: /path/to/your/home/PepTune
+base_path: /home/e/e1519498/peptune
 mode: train  # train / ppl_eval / sample_eval
 diffusion: absorbing_state
 vocab: old_smiles # old_smiles / new_smiles / selfies / helm

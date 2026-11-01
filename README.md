@@ -20,7 +20,7 @@ conda activate peptune
 
 Follow the steps below to download the model weights required for this experiment.
 
-1. Download the PepTune pre-trained MDLM checkpoint and place in `checkpoints/`: https://drive.google.com/file/d/1oXGDpKLNF0KX0ZdOcl1NZj5Czk2lSFUn/view?usp=sharing
+1. Download the PepTune pre-trained MDLM checkpoint and place in `checkpoints/` as `epoch13-new-tokenizer.ckpt`: https://drive.google.com/file/d/1oXGDpKLNF0KX0ZdOcl1NZj5Czk2lSFUn/view?usp=sharing
 2. Download the pre-trained binding affinity Transformer model and place in `src/scoring/functions/classifiers/`: https://drive.google.com/file/d/128shlEP_-rYAxPgZRCk_n0HBWVbOYSva/view?usp=sharing
 
 ## Training Data Download

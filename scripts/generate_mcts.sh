@@ -23,7 +23,7 @@ echo "Activating conda environment..."
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate peptune
 
-mkdir -p "${HOME_LOC}/${PROT_NAME1}"
+mkdir -p "${HOME_LOC}/results/${PROT_NAME1}"
 mkdir -p "${LOG_LOC}"
 
 echo "Running MCTS generation with parameters:"

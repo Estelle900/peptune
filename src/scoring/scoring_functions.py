@@ -7,7 +7,9 @@ from scoring.functions.solubility import Solubility
 from scoring.functions.hemolysis import Hemolysis
 from scoring.functions.nonfouling import Nonfouling
 
-base_path = '/path/to/your/home'
+from pathlib import Path
+
+base_path = Path.home() / "peptune"
 
 class ScoringFunctions:
     def __init__(self, score_func_names=None, prot_seqs=None, device=None):

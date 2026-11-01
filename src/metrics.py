@@ -1,5 +1,10 @@
 import pandas as pd
 from math import sqrt
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('prot')
+
 
 def summarize_metrics(skip, csv_path: str, save_path: str | None = None) -> pd.DataFrame:
     """
@@ -60,10 +65,12 @@ def csv_column_to_list(path: str, column: str, *, dropna: bool = True):
     return s.tolist()
 
 def main():
-    csv_path = "/scratch/pranamlab/sophtang/home/tr2d2/peptides/plots/glast_resample20_no-mcts/"
-    path = "/scratch/pranamlab/sophtang/home/TR2-D2/tr2d2-pep/results/tfr_resample10_buffer20_numiter10_children50_20260326_183626"
+    prot_name = parser.parse_args().prot
+    peptune_home = "/home/e/e1519498/peptune"
+    csv_path = f"{peptune_home}/{prot_name}/plots/" 
+    path = f"{peptune_home}/{prot_name}"
     prot_name = "tfr"
-    stats = summarize_metrics(skip=1, csv_path=f"{path}/{prot_name}_generation_results.csv", 
+    stats = summarize_metrics(skip=1, csv_path=f"{path}/2_mcts_length_100_epoch_7.csv", 
                               save_path=f"{path}/results_summary.csv")
 
     print(stats)
