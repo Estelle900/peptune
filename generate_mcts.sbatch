@@ -45,7 +45,7 @@ if [[ ! -x "$HOME_LOC/.venv/bin/python" ]]; then
     exit 1
 fi
 
-mkdir -p "$HOME_LOC/logs" "$HOME_LOC/$PROT_NAME1"
+mkdir -p "$HOME_LOC/logs" "$HOME_LOC/results/$PROT_NAME1"
 
 echo "SLURM Job ID: ${SLURM_JOB_ID:-unknown}"
 echo "Node: $(hostname)"

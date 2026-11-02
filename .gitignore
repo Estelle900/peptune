@@ -1,8 +1,10 @@
 logs/
 results/
+results_unconditional/
 quickstart_results/
 uvcache/
 data/
 checkpoints/
 **/*.pt
 **/*.log
+**/__pycache__/

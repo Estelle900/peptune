@@ -55,7 +55,7 @@ nvidia-smi
 
 # Preserve the original Hydra arguments
 for PROT_NAME1 in $(python -c "from src.LNR_Sequences import LNR_Sequences as r; print(*r.keys())"); do
-  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/$PROT_NAME1"
+  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/results/$PROT_NAME1"
   HYDRA_ARGS=(
       "+prot_name1=$PROT_NAME1"
       "++mode=$MODE"

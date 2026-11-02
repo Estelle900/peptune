@@ -55,7 +55,7 @@ nvidia-smi
 
 # Preserve the original Hydra arguments
 for PROT_NAME1 in gfap p53 tfr glp1 ncam; do
-  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/$PROT_NAME1"
+  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/results/$PROT_NAME1"
   HYDRA_ARGS=(
       "+prot_name1=$PROT_NAME1"
       "++mode=$MODE"

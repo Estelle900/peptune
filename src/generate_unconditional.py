@@ -1,111 +1,140 @@
 import os
-import torch
-import torch.nn.functional as F
 import sys
-import pandas as pd
-import omegaconf
-from utils.generate_utils import mask_for_de_novo, calculate_cosine_sim, calculate_hamming_dist
-from diffusion import Diffusion
+import time
+from pathlib import Path
+
 import hydra
-from tqdm import tqdm
+import omegaconf
+import pandas as pd
+import torch
+
+from diffusion import Diffusion
+from generate_mcts import PROTEIN_SEQUENCES
+from LNR_Sequences import LNR_Sequences as LNR_SEQUENCES
+from scoring.scoring_functions import ScoringFunctions
 from tokenizer.my_tokenizers import SMILES_SPE_Tokenizer
 from utils.app import PeptideAnalyzer
-from scoring.scoring_functions import ScoringFunctions
+from utils.generate_utils import mask_for_de_novo
 
-# Register custom OmegaConf resolvers required by config.yaml
+# Hydra resolvers used by the shared configuration.
 omegaconf.OmegaConf.register_new_resolver('cwd', os.getcwd, replace=True)
 omegaconf.OmegaConf.register_new_resolver('device_count', torch.cuda.device_count, replace=True)
 omegaconf.OmegaConf.register_new_resolver('eval', eval, replace=True)
 omegaconf.OmegaConf.register_new_resolver('div_up', lambda x, y: (x + y - 1) // y, replace=True)
 
-base_path = '/path/to/your/home/PepTune'
-ckpt_path = base_path + '/checkpoints/peptune-pretrained.ckpt'
 
 @torch.no_grad()
 def generate_sequence_unconditional(config, sequence_length: int, mdlm: Diffusion):
-    tokenizer = mdlm.tokenizer
-    # generate array of [MASK] tokens
-    masked_array = mask_for_de_novo(config, sequence_length)
-
-    inputs = tokenizer.encode(masked_array)
-    
-    # tokenized masked array
+    inputs = mdlm.tokenizer.encode(mask_for_de_novo(config, sequence_length))
     inputs = {key: value.to(mdlm.device) for key, value in inputs.items()}
-    # sample unconditional array of tokens
-    logits = mdlm._sample(x_input=inputs) # using sample, change config.sampling.steps to determine robustness
+    generated = mdlm._sample(x_input=inputs)
+    return generated, inputs
 
-    return logits, inputs
+
+def protein_sequence(name):
+    if name is None:
+        return None
+    key = str(name).lower()
+    sequence = PROTEIN_SEQUENCES.get(key, LNR_SEQUENCES.get(key))
+    if sequence is None:
+        supported = sorted(set(PROTEIN_SEQUENCES) | set(LNR_SEQUENCES))
+        raise ValueError(f"Unknown target protein {name!r}. Supported targets: {', '.join(supported)}")
+    return sequence
 
 
 @hydra.main(version_base=None, config_path='.', config_name='config')
 def main(config):
+    base_path = Path(config.base_path).expanduser().resolve()
+    target_name = str(config.get('prot_name1', 'gfap')).lower()
+    second_name = config.get('prot_name2', None)
+    second_name = str(second_name).lower() if second_name else None
+    mode = config.get('mode', '2')
+    model_type = config.get('model_type', 'unconditional')
+    length = config.get('length', '100')
+    epoch = config.get('epoch', '7')
+    filename = f'{mode}_{model_type}_length_{length}_epoch_{epoch}'
+    if second_name:
+        filename += f'_vs_{second_name}'
 
-    tokenizer = SMILES_SPE_Tokenizer(f'{base_path}/src/tokenizer/new_vocab.txt', 
-                                f'{base_path}/src/tokenizer/new_splits.txt')
+    prot_seqs = [protein_sequence(target_name)]
+    if second_name:
+        prot_seqs.append(protein_sequence(second_name))
 
-    # Build model with current config, then load weights manually
-    # (load_from_checkpoint overrides config with saved hparams)
-    mdlm_model = Diffusion(config=config, tokenizer=tokenizer)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    mdlm_model.load_state_dict(ckpt["state_dict"], strict=False)
-    
-    mdlm_model.eval()
-    device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
-    mdlm_model.to(device)
+    tokenizer = SMILES_SPE_Tokenizer(
+        str(base_path / 'src/tokenizer/new_vocab.txt'),
+        str(base_path / 'src/tokenizer/new_splits.txt'),
+    )
+    checkpoint = str(config.eval.checkpoint_path)
+    mdlm = Diffusion.load_from_checkpoint(
+        checkpoint, config=config, tokenizer=tokenizer,
+        strict=False, map_location='cpu', weights_only=False,
+    )
+    mdlm.eval()
+    mdlm.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
-    print("loaded models...")
+    # Use the same objective set as the existing unconditional generator.
+    score_func_names = [
+        'binding_affinity1', 'solubility', 'hemolysis',
+        'nonfouling', 'permeability',
+    ]
+    if second_name:
+        score_func_names.append('binding_affinity2')
+    score_functions = ScoringFunctions(score_func_names, prot_seqs, device=mdlm.device)
     analyzer = PeptideAnalyzer()
-    
-    gfap = 'MERRRITSAARRSYVSSGEMMVGGLAPGRRLGPGTRLSLARMPPPLPTRVDFSLAGALNAGFKETRASERAEMMELNDRFASYIEKVRFLEQQNKALAAELNQLRAKEPTKLADVYQAELRELRLRLDQLTANSARLEVERDNLAQDLATVRQKLQDETNLRLEAENNLAAYRQEADEATLARLDLERKIESLEEEIRFLRKIHEEEVRELQEQLARQQVHVELDVAKPDLTAALKEIRTQYEAMASSNMHEAEEWYRSKFADLTDAAARNAELLRQAKHEANDYRRQLQSLTCDLESLRGTNESLERQMREQEERHVREAASYQEALARLEEEGQSLKDEMARHLQEYQDLLNVKLALDIEIATYRKLLEGEENRITIPVQTFSNLQIRETSLDTKSVSEGHLKRNIVVKTVEMRDGEVIKESKQEHKDVM'
 
-    # scoring functions
-    score_func_names = ['binding_affinity1', 'solubility', 'hemolysis', 'nonfouling', 'permeability']
-    score_functions = ScoringFunctions(score_func_names, [gfap])
-    
+    columns = [
+        'Generated SMILES', 'Perplexity', 'Peptide Sequence',
+        'Binding Affinity', 'Solubility', 'Hemolysis',
+        'Nonfouling', 'Permeability',
+    ]
+    if second_name:
+        columns.append('Binding Affinity 2')
 
-    max_seq_length = config.sampling.seq_length
-    num_sequences = config.sampling.num_sequences
-    generation_results = []
-    num_valid = 0.
-    num_total = 0.
-    while num_total < num_sequences: 
-        num_total += 1
-        generated_array, input_array = generate_sequence_unconditional(config, max_seq_length, mdlm_model)
-        
-        # store in device
-        generated_array = generated_array.to(mdlm_model.device)
-        print(generated_array)
-        
-        # compute masked perplexity
-        perplexity = mdlm_model.compute_masked_perplexity(generated_array, input_array['input_ids'])
-        perplexity = round(perplexity, 4)
-        
-        smiles_seq = tokenizer.decode(generated_array)
-        if analyzer.is_peptide(smiles_seq):
-            aa_seq, seq_length = analyzer.analyze_structure(smiles_seq)
+    num_sequences = int(config.sampling.num_sequences)
+    if num_sequences <= 0:
+        raise ValueError('sampling.num_sequences must be positive')
+    results = []
+    num_valid = 0
+    start = time.time()
+    print(f'Target: {target_name}; second target: {second_name}; samples: {num_sequences}')
+    print(f'Checkpoint: {checkpoint}')
+    for i in range(num_sequences):
+        generated, masked_inputs = generate_sequence_unconditional(
+            config, int(config.sampling.seq_length), mdlm,
+        )
+        generated = generated.to(mdlm.device)
+        perplexity = round(float(mdlm.compute_masked_perplexity(
+            generated, masked_inputs['input_ids'])), 4)
+        smiles = tokenizer.decode(generated)
+        if analyzer.is_peptide(smiles):
+            aa_sequence, seq_length = analyzer.analyze_structure(smiles)
+            scores = score_functions(input_seqs=[smiles])[0]
+            results.append([smiles, perplexity, aa_sequence, *map(float, scores)])
             num_valid += 1
-            scores = score_functions(input_seqs=[smiles_seq])
-            
-            binding = scores[0][0]
-            sol = scores[0][1]
-            hemo = scores[0][2]
-            nf = scores[0][3]
-            perm = scores[0][4]
-            
-            generation_results.append([smiles_seq, perplexity, aa_seq, binding, sol, hemo, nf, perm])
+            print(f'{i + 1}/{num_sequences}: valid | length={seq_length} | '
+                  f'perplexity={perplexity} | scores={scores} | SMILES={smiles}')
         else:
-            aa_seq = "not valid peptide"
-            seq_length = '-'
-            scores = "not valid peptide"
-        
-        
-        print(f"perplexity: {perplexity} | length: {seq_length} | smiles sequence: {smiles_seq} | amino acid sequence: {aa_seq} | scores: {scores}")
+            print(f'{i + 1}/{num_sequences}: invalid | '
+                  f'perplexity={perplexity} | SMILES={smiles}')
         sys.stdout.flush()
 
-    valid_frac = num_valid / num_total
-    print(f"fraction of synthesizable peptides: {valid_frac}")
-    df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling', 'Permeability'])
-    df.to_csv(base_path + f'/results/test_generate.csv', index=False)
-        
-if __name__ == "__main__":
+    output_dir = base_path / 'results_unconditional' / target_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f'{filename}.csv'
+    df = pd.DataFrame(results, columns=columns)
+    df.to_csv(output_path, index=False)
+    print(f'Valid peptide fraction: {num_valid / num_sequences:.4f} '
+          f'({num_valid}/{num_sequences})')
+    print(f'Generation complete in {time.time() - start:.1f}s; saved {output_path}')
+    if not df.empty:
+        for column in ['Perplexity', *columns[3:]]:
+            values = pd.to_numeric(df[column], errors='coerce').dropna()
+            if not values.empty:
+                print(f'{column}: mean={values.mean():.4f}, std={values.std():.4f}, '
+                      f'min={values.min():.4f}, max={values.max():.4f}')
+
+
+if __name__ == '__main__':
     main()
+
+

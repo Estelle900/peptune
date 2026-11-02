@@ -143,7 +143,7 @@ wandb:
 
 hydra:
   run:
-    dir: ./${now:%Y.%m.%d}/
+    dir: ${oc.env:SLURM_TMPDIR,/tmp}/peptune/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S_%f}
   job:
     chdir: True
 
