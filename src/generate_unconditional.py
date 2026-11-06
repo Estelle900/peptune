@@ -114,6 +114,10 @@ def main(config):
             print(f'{i + 1}/{num_sequences}: valid | length={seq_length} | '
                   f'perplexity={perplexity} | scores={scores} | SMILES={smiles}')
         else:
+            # Save invalid generations too, without property scores.
+            results.append(
+                [smiles, perplexity, None] + [None] * (len(columns) - 3)
+            )
             print(f'{i + 1}/{num_sequences}: invalid | '
                   f'perplexity={perplexity} | SMILES={smiles}')
         sys.stdout.flush()

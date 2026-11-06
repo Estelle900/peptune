@@ -16,8 +16,12 @@ import math
 import re
 import sys
 from pathlib import Path
-
 import pandas as pd
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(SRC_DIR))
+
+from utils.app import PeptideAnalyzer
+from rdkit import rdBase
 
 SMILES = "Generated SMILES"
 PEPTIDE = "Peptide Sequence"
@@ -72,6 +76,52 @@ def csv_files(base: Path, output: Path) -> list[Path]:
         files.append(path)
     return files
 
+def filter_valid_peptides(frame, analyzer, metadata):
+    """Keep valid peptides and record every excluded row."""
+    valid_flags = []
+    omitted = []
+
+    for i, smiles in enumerate(frame[SMILES]):
+        reason = None
+
+        if not isinstance(smiles, str) or not smiles.strip():
+            is_valid = False
+            reason = "missing or empty SMILES"
+        else:
+            try:
+                with rdBase.BlockLogs():
+                    is_valid = bool(analyzer.is_peptide(smiles))
+                if not is_valid:
+                    reason = "PeptideAnalyzer.is_peptide returned False"
+            except Exception as exc:
+                is_valid = False
+                reason = f"PeptideAnalyzer error: {exc}"
+
+        valid_flags.append(is_valid)
+
+        if not is_valid:
+            omitted.append({
+                **metadata,
+                "csv_row": i + 2,
+                SMILES: smiles,
+                PEPTIDE: (
+                    frame[PEPTIDE].iloc[i]
+                    if PEPTIDE in frame else None
+                ),
+                "reason": reason,
+            })
+
+    return frame.loc[valid_flags].copy(), omitted
+
+
+def validity_counts(n_saved, n_valid):
+    return {
+        "n_saved_rows": n_saved,
+        "n_invalid_omitted": n_saved - n_valid,
+        "valid_fraction_among_saved": (
+            n_valid / n_saved if n_saved else float("nan")
+        ),
+    }
 
 def numeric_values(frame: pd.DataFrame, column: str) -> pd.Series:
     values = pd.to_numeric(frame[column], errors="coerce")
@@ -149,9 +199,16 @@ def macro_metric_rows(per_target: pd.DataFrame, n_targets_total: int) -> pd.Data
 
 
 MACRO_COUNT_FIELDS = (
-    "n_peptides", "n_unique_smiles", "smiles_unique_fraction",
-    "n_unique_peptide_sequence", "peptide_sequence_unique_fraction",
-    "estimated_attempts", "estimated_valid_fraction",
+    "n_saved_rows",
+    "n_peptides",
+    "n_invalid_omitted",
+    "valid_fraction_among_saved",
+    "n_unique_smiles",
+    "smiles_unique_fraction",
+    "n_unique_peptide_sequence",
+    "peptide_sequence_unique_fraction",
+    "estimated_attempts",
+    "estimated_valid_fraction",
 )
 
 
@@ -324,6 +381,8 @@ def infer_method(directory: Path) -> str:
 def summarize(base: Path, output: Path, order_override: str,
               attempts_override: int | None) -> dict[str, pd.DataFrame]:
     method = infer_method(base)
+    analyzer = PeptideAnalyzer()
+    omitted_rows = []
     attempts, source = configured_attempts(base, attempts_override) if method == "unconditional" else (None, "not applicable")
     per_file_counts, per_file_metrics, score_mappings, rollout_validity = [], [], [], []
     grouped: dict[str, list[pd.DataFrame]] = {}
@@ -340,16 +399,36 @@ def summarize(base: Path, output: Path, order_override: str,
             continue
         target = path.relative_to(base).parts[0]
         meta = {"method": method, "target": target, "file": str(path.relative_to(base))}
-        clean, mapping = normalise_scores(frame, path, method, order_override, meta)
+
+        # Validate every generated SMILES using the same peptide rule.
+        valid_frame, omitted = filter_valid_peptides(
+            frame, analyzer, meta
+        )
+        omitted_rows.extend(omitted)
+
+        if omitted:
+            warn(
+                f"Omitting {len(omitted)} invalid peptides "
+                f"from {path}"
+            )
+
+        # All subsequent metrics use only valid peptides.
+        clean, mapping = normalise_scores(
+            valid_frame, path, method, order_override, meta
+        )
         score_mappings.extend(mapping)
-        count_row = {**meta, **counts(clean)}
+        count_row = {
+            **meta,
+            **counts(clean),
+            **validity_counts(len(frame), len(clean)),
+        }
         if method == "unconditional":
             # Assumes this generation file reflects a COMPLETE run. We cannot
             # reconstruct actual attempted generations from valid-only CSVs.
             count_row.update({
                 "estimated_attempts": attempts if attempts is not None else pd.NA,
                 "attempts_source": source,
-                "estimated_valid_fraction": len(frame) / attempts if attempts else float("nan"),
+                "estimated_valid_fraction": len(clean) / attempts if attempts else float("nan"),
             })
             if attempts and len(frame) > attempts:
                 warn(f"saved rows exceed assumed attempts in {path}: {len(frame)} > {attempts}")
@@ -369,7 +448,9 @@ def summarize(base: Path, output: Path, order_override: str,
     for target, frames in sorted(grouped.items()):
         combined = pd.concat(frames, ignore_index=True, sort=False)
         meta = {"method": method, "target": target, "n_files": len(frames)}
-        row = {**meta, **counts(combined)}
+        n_saved = sum(r["n_saved_rows"] for r in per_file_counts if r["target"] == target)
+
+        row = {**meta,  **counts(combined), **validity_counts(n_saved, len(combined)),}
         if method == "unconditional":
             total_attempts = attempts * len(frames) if attempts else None
             row.update({
@@ -382,7 +463,13 @@ def summarize(base: Path, output: Path, order_override: str,
 
     combined = pd.concat(all_frames, ignore_index=True, sort=False)
     overall_meta = {"method": method, "target": "ALL", "n_files": len(all_frames)}
-    overall_count = {**overall_meta, **counts(combined)}
+    n_saved_total = sum(r["n_saved_rows"] for r in per_file_counts)
+
+    overall_count = {
+        **overall_meta,
+        **counts(combined),
+        **validity_counts(n_saved_total, len(combined)),
+    }
     if method == "unconditional":
         total_attempts = attempts * len(all_frames) if attempts else None
         overall_count.update({
@@ -415,6 +502,9 @@ def summarize(base: Path, output: Path, order_override: str,
         "macro_counts.csv": macro_counts_table,
         "macro_metrics.csv": macro_metrics_table,
         "score_mappings.csv": pd.DataFrame(score_mappings),
+        "invalid_peptides.csv": pd.DataFrame(omitted_rows, columns=[
+                "method","target","file","csv_row", SMILES, PEPTIDE,"reason"
+            ]),
     }
     if method == "guided":
         results["mcts_rollout_validity.csv"] = pd.DataFrame(rollout_validity)
@@ -534,9 +624,24 @@ def main() -> int:
             compared = summarize(other, output, args.mcts_score_order, args.attempts_per_file)
         except ValueError as exc:
             parser.error(str(exc))
+        
+        # Include exclusions from both guided and unconditional runs.
+        results["invalid_peptides.csv"] = pd.concat(
+            [
+                results["invalid_peptides.csv"],
+                compared["invalid_peptides.csv"],
+            ],
+            ignore_index=True,
+        )
+
         results.update(compare_summaries(results, compared))
 
     save_results(results, output)
+    print(
+        f"\nTotal invalid peptides omitted: "
+        f"{len(results['invalid_peptides.csv'])}"
+    )
+    print(f"Invalid peptide details: {output / 'invalid_peptides.csv'}")
     print(f"\nEvaluated {len(results['per_file_counts.csv'])} generation files from {base}")
     print("\nOverall saved peptide counts (not MCTS generation-attempt counts):")
     print(results["overall_counts.csv"].to_string(index=False))

@@ -2,9 +2,9 @@
 #SBATCH --job-name=peptune-mcts
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100-80:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=logs/peptune-mcts-%j.out
 #SBATCH --error=logs/peptune-mcts-%j.err
 

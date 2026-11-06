@@ -335,7 +335,7 @@ def main(config):
         sys.stdout.flush()
 
     if config.mcts.perm:
-        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling', 'Permeability'])
+        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Permeability', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling'])
     elif config.mcts.dual:
         df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity 1', 'Binding Affinity 2', 'Solubility', 'Hemolysis', 'Nonfouling'])
     elif config.mcts.single:

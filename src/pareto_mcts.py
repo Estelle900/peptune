@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import numpy as np
+from pareto_front_utils import ParetoArchive, add_nondominated
 import random as rd
 
 from diffusion import Diffusion
@@ -141,55 +142,17 @@ class Node:
 """END OF NODE CLASS"""
 
 def updateParetoFront(paretoFront, node, scoreVector, num_func):
-    """
-        Removes sequences that are dominated by scoreVector
-        adds the SMILES sequence if it is non-dominated and its scoreVector
-    """
-    paretoSize = len(paretoFront)
-    if paretoSize == 0:
-        # if pareto front is empty, add sequence and scoreVector
-        paretoFront[node] = scoreVector
-    else:
-        # vector of boolean
-        # true: sequence is non-dominated by the pareto-optimal sequence
-        # false: sequence is completely dominated by the pareto-optimal sequence
-        nondominate = []
-        # sequences to be deleted
-        delete = []
-        for k, v in paretoFront.items():
-            nondominated = scoreVector >= np.asarray(v)
-            dominant = scoreVector > np.asarray(v)
-            
-            if num_func <= len(nondominated):
-                attn_nondominated = nondominated[:num_func]
-                attn_dominant = dominant[:num_func]
-            
-            # all scores are greater than or equal to v and at least one score is strictly greater than v
-            if attn_nondominated.all() and attn_dominant.any():
-                # add the dominated sequence to be deleted
-                delete.append(k)
-                # sequence is dominant
-                nondominate.append(True)
-            elif attn_nondominated.all():
-                # sequence is non-dominated
-                nondominate.append(True)
-            else:
-                # sequence is completely dominated
-                nondominate.append(False)
-        
-        nondominate = np.asarray(nondominate)
-        # if sequence is either dominant or non-dominated by all sequences in pareto-front -> add to pareto front
-        if nondominate.all():
-            paretoFront[node] = scoreVector
-            
-        # delete all dominated sequences
-        while (paretoSize > 0) and (len(delete) > 0):
-            #for k in delete:
-            del paretoFront[delete[0]]
-            del delete[0]
-            paretoSize -= 1
-    return paretoFront
-    
+    """Update the node-selection front using proper Pareto dominance."""
+    # This front uses node objects as keys and raw score vectors as values.
+    if node in paretoFront:
+        del paretoFront[node]
+        # Rebuild if the existing node's score changed.
+        old = list(paretoFront.items())
+        paretoFront.clear()
+        for other_node, other_scores in old:
+            add_nondominated(paretoFront, other_node, other_scores, num_func)
+    add_nondominated(paretoFront, node, scoreVector, num_func)
+    return paretoFront    
 ###BEGINNING OF MCTS CLASS###
 
 class MCTS:
@@ -201,6 +164,8 @@ class MCTS:
         self.peptideParetoFront = {} 
         self.num_steps = config.sampling.steps
         self.num_sequences = config.sampling.num_sequences
+        self._candidate_archive = ParetoArchive(self.num_sequences)
+        self.peptideParetoFront = self._candidate_archive.selected
         
         # mdlm model
         self.mdlm = mdlm
@@ -232,7 +197,8 @@ class MCTS:
         self.iter_num = 0
         self.valid_fraction_log = []
         self.score_logs = {name: [] for name in self.score_func_names}
-        self.peptideParetoFront = {} 
+        self._candidate_archive = ParetoArchive(self.num_sequences)
+        self.peptideParetoFront = self._candidate_archive.selected
         
     def forward(self, rootNode):
         self.reset()
@@ -252,77 +218,33 @@ class MCTS:
 
     # change to include more even if dominated? since there is error in the scores
     def updateParetoFront(self, sequence, scoreVector, tokens):
-        """
-            Removes sequences that are dominated by scoreVector
-            adds the SMILES sequence if it is non-dominated and its scoreVector
-            
-            num_func: index of the last objective to consider when updating the pareto front from 0 to K
-        """
-        paretoSize = len(self.peptideParetoFront)
-        
-        self.curr_num_func = 1
-                
-        for i in range(len(self.num_func)):
-            if self.iter_num >= self.num_func[i]:
-                self.curr_num_func = i+1
-        
-        if paretoSize == 0:
-            # if pareto front is empty, add sequence and scoreVector
-            self.peptideParetoFront[sequence] = {'scores': scoreVector, 'token_ids': tokens}
-            # if pareto front is empty, set reward vector to 1s
-            rewardVector = np.ones(len(scoreVector))
-        else:
-            # vector of boolean
-            # true: sequence is non-dominated by the pareto-optimal sequence
-            # false: sequence is completely dominated by the pareto-optimal sequence
-            nondominate = []
-            # sequences to be deleted
-            delete = []
-            # initialize reward vector with zeros
-            rewardVector = np.zeros(len(scoreVector))
-            for k, v in self.peptideParetoFront.items():
-                 # boolean vector 
-                # true: if all metrics are equal or larger
-                # false: if the pareto front sequence dominates scoreVector
-                nondominated = scoreVector >= np.asarray(v['scores']) # [num_objectives]
-                dominant = scoreVector > np.asarray(v['scores'])
-                # add to reward vector
-                rewardVector += nondominated # [num_objectives]
+        """Track the true non-dominated front, and save a capped diverse subset.
 
-                if self.curr_num_func <= len(nondominated):
-                    attn_nondominated = nondominated[:self.curr_num_func]
-                    attn_dominant = dominant[:self.curr_num_func]
-                
-                # only delete pareto-optimal sequence if
-                # all scores are greater than or equal to v and at least one score is strictly greater than v
-                if attn_nondominated.all() and attn_dominant.any():
-                    # add the dominated sequence to be deleted
-                    delete.append(k)
-                    # sequence is dominant
-                    nondominate.append(True)
-                elif attn_nondominated.all():
-                    # sequence is non-dominated
-                    nondominate.append(True)
-                else:
-                    # sequence is completely dominated
-                    nondominate.append(False)
-            
-            assert len(nondominate) == paretoSize
-            nondominate = np.asarray(nondominate)
-            # if sequence is either dominant or non-dominated by all sequences in pareto-front -> add to pareto front
-            # or if the pareto front does not have enough sequences
-            if nondominate.all() or paretoSize < self.num_sequences:
-                self.peptideParetoFront[sequence] = {'scores': scoreVector, 'token_ids': tokens}
-            
-            rewardVector = rewardVector / paretoSize
-                
-            # delete all dominated sequences if pareto front is larger than num_sequences
-            while (paretoSize > self.num_sequences) and (len(delete) > 0):
-                #for k in delete:
-                del self.peptideParetoFront[delete[0]]
-                del delete[0]
-                paretoSize -= 1
-            
+        All objectives in the scoring vector must be larger-is-better.
+        Rewards retain the original 'fraction of existing peptides beaten per
+        objective' interpretation, and are computed before modifying the pool.
+        """
+        active = 1
+        for i, start_iteration in enumerate(self.num_func):
+            if self.iter_num >= start_iteration:
+                active = i + 1
+        self.curr_num_func = active
+
+        scores = np.asarray(scoreVector, dtype=float)
+        if scores.ndim != 1 or not np.isfinite(scores).all():
+            # Never store NaN/Inf scores in the Pareto set.
+            return np.zeros(self.config.mcts.num_objectives, dtype=float)
+
+        if self.peptideParetoFront:
+            old_scores = [np.asarray(v["scores"], dtype=float)
+                          for v in self.peptideParetoFront.values()]
+            rewardVector = np.mean([scores >= old for old in old_scores], axis=0)
+        else:
+            rewardVector = np.ones(scores.size, dtype=float)
+
+        self.peptideParetoFront = self._candidate_archive.add(
+            sequence, scores, tokens, self.curr_num_func,
+        )
         return rewardVector
 
     def isPathEnd(self, path, maxDepth): 
