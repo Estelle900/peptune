@@ -198,6 +198,20 @@ def plot_data_with_distribution_seaborn(log1, log2=None,
         print(f"Plot saved to {save_path}")
     plt.show()
 
+def get_results_dir(config, prot_name):
+    reliable = config.mcts.get("use_reliable_scores", False)
+
+    folder = (
+        "results_reliable_scores"
+        if reliable else "results"
+    )
+
+    output_dir = os.path.join(
+        config.base_path, folder, prot_name
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
 @torch.no_grad()
 def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, prot_name1=None, prot_name2 = None):
     tokenizer = mdlm.tokenizer
@@ -229,7 +243,41 @@ def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, pro
     else: 
         score_func_names = ['binding_affinity1', 'solubility', 'hemolysis', 'nonfouling']  
         num_func = [0, 0, 0, 0]
-        
+    
+
+    # Remove unreliable objectives only when requested
+    if config.mcts.get("use_reliable_scores", False):
+        disabled_scores = {
+            "binding_affinity1",
+            "binding_affinity2",
+            "solubility",
+            "nonfouling",
+        }
+
+        score_func_names = [
+            name for name in score_func_names
+            if name not in disabled_scores
+        ]
+
+    if not score_func_names:
+        raise ValueError(
+            "No MCTS objectives remain after filtering."
+        )
+
+    # Match reward-vector dimensions to active objectives
+    config.mcts.num_objectives = len(score_func_names)
+    num_func = [0] * len(score_func_names)
+
+    # Initialize root AFTER updating num_objectives
+    rootNode = Node(
+        config=config,
+        tokens=inputs,
+        timestep=0,
+    )
+
+    print("Active MCTS scores:", score_func_names)
+
+
     if not config.mcts.time_dependent:
         num_func = [0] * len(score_func_names)
     
@@ -241,22 +289,39 @@ def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, pro
         mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, num_func=num_func)
     else:
         mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, num_func=num_func)
-    
-    paretoFront = mcts.forward(rootNode)
-    
-    output_log_path = f'{config.base_path}/results/{prot_name1}/log_{filename}.csv'
-    save_logs_to_file(config, mcts.valid_fraction_log, mcts.score_logs, output_log_path)
 
-    plot_data(mcts.valid_fraction_log, 
-            save_path=f'{config.base_path}/results/{prot_name1}/valid_{filename}.png')
-    
+    paretoFront = mcts.forward(rootNode)
+
+    output_dir = get_results_dir(config, prot_name1)
+
+    output_log_path = os.path.join(
+        output_dir, f"log_{filename}.csv"
+    )
+    save_logs_to_file(
+        config,
+        mcts.valid_fraction_log,
+        mcts.score_logs,
+        output_log_path,
+    )
+
+    plot_data(
+        mcts.valid_fraction_log,
+        save_path=os.path.join(
+            output_dir, f"valid_{filename}.png"
+        ),
+    )
+
     for name in mcts.score_func_names:
-        plot_data_with_distribution_seaborn(log1=mcts.score_logs[name],
-                save_path=f'{config.base_path}/results/{prot_name1}/{name}_{filename}.png',
-                label1=f"Average {name}",
-                title=f"Average {name} Over Iterations")
-    
-    return paretoFront, inputs
+        plot_data_with_distribution_seaborn(
+            log1=mcts.score_logs[name],
+            save_path=os.path.join(
+                output_dir, f"{name}_{filename}.png"
+            ),
+            label1=f"Average {name}",
+            title=f"Average {name} Over Iterations",
+        )
+
+    return paretoFront, inputs, score_func_names
 
 
 @hydra.main(version_base=None, config_path='.', config_name='config')
@@ -299,51 +364,61 @@ def main(config):
         print(f"Using protein 2: {prot_name2}")
     
     t_start = time.time()
-    paretoFront, input_array = generate_valid_mcts(config, mdlm, prot_seq1, prot_seq2, filename, prot_name1, prot_name2)
-    generation_results = []
-    
-    for sequence, v in paretoFront.items():
-        generated_array = v['token_ids'].to(mdlm.device)
-        
-        # compute perplexity
-        perplexity = mdlm.compute_masked_perplexity(generated_array, input_array['input_ids'])
-        perplexity = round(perplexity, 4)
-        
-        aa_seq, seq_length = analyzer.analyze_structure(sequence)
-        scores = v['scores']
-        
-        if config.mcts.single == False:
-            binding1 = scores[0]
-            solubility = scores[1]
-            hemo = scores[2]
-            nonfouling = scores[3]
-        
-        if config.mcts.perm:
-            permeability = scores[4]
-            generation_results.append([sequence, perplexity, aa_seq, binding1, solubility, hemo, nonfouling, permeability])
-            print(f"perplexity: {perplexity} | length: {seq_length} | smiles sequence: {sequence} | amino acid sequence: {aa_seq} | Binding Affinity: {binding1} | Solubility: {solubility} | Hemolysis: {hemo} | Nonfouling: {nonfouling} | Permeability: {permeability}")
-        elif config.mcts.dual:
-            binding2 = scores[4]
-            generation_results.append([sequence, perplexity, aa_seq, binding1, binding2, solubility, hemo, nonfouling])
-            print(f"perplexity: {perplexity} | length: {seq_length} | smiles sequence: {sequence} | amino acid sequence: {aa_seq} | Binding Affinity 1: {binding1} | Binding Affinity 2: {binding2} | Solubility: {solubility} | Hemolysis: {hemo} | Nonfouling: {nonfouling}")
-        elif config.mcts.single:
-            permeability = scores[0]
-        else: 
-            generation_results.append([sequence, perplexity, aa_seq, binding1, solubility, hemo, nonfouling])
-            print(f"perplexity: {perplexity} | length: {seq_length} | smiles sequence: {sequence} | amino acid sequence: {aa_seq} | Binding Affinity: {binding1} | Solubility: {solubility} | Hemolysis: {hemo} | Nonfouling: {nonfouling}")
+    paretoFront, input_array, score_func_names = generate_valid_mcts(config, mdlm, prot_seq1, prot_seq2, filename, prot_name1, prot_name2)
 
+    score_labels = {
+        "binding_affinity1": "Binding Affinity",
+        "binding_affinity2": "Binding Affinity 2",
+        "solubility": "Solubility",
+        "hemolysis": "Hemolysis",
+        "nonfouling": "Nonfouling",
+        "permeability": "Permeability",
+    }
+
+    columns = [
+        "Generated SMILES",
+        "Perplexity",
+        "Peptide Sequence",
+    ] + [score_labels[name] for name in score_func_names]
+
+    generation_results = []
+
+    for sequence, v in paretoFront.items():
+        generated_array = v["token_ids"].to(mdlm.device)
+
+        perplexity = mdlm.compute_masked_perplexity(
+            generated_array, input_array["input_ids"]
+        )
+        perplexity = round(perplexity, 4)
+
+        aa_seq, seq_length = analyzer.analyze_structure(sequence)
+        scores = list(v["scores"])
+
+        generation_results.append(
+            [sequence, perplexity, aa_seq] + scores
+        )
+
+        score_text = " | ".join(
+            f"{score_labels[name]}: {score}"
+            for name, score in zip(score_func_names, scores)
+        )
+
+        print(
+            f"perplexity: {perplexity} | "
+            f"length: {seq_length} | "
+            f"smiles sequence: {sequence} | "
+            f"amino acid sequence: {aa_seq} | "
+            f"{score_text}"
+        )
         sys.stdout.flush()
 
-    if config.mcts.perm:
-        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Permeability', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling'])
-    elif config.mcts.dual:
-        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity 1', 'Binding Affinity 2', 'Solubility', 'Hemolysis', 'Nonfouling'])
-    elif config.mcts.single:
-        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Permeability'])
-    else: 
-        df = pd.DataFrame(generation_results, columns=['Generated SMILES', 'Perplexity', 'Peptide Sequence', 'Binding Affinity', 'Solubility', 'Hemolysis', 'Nonfouling'])
+    df = pd.DataFrame(generation_results, columns=columns)
 
-    df.to_csv(f'{config.base_path}/results/{prot_name1}/{filename}.csv', index=False)
+    output_dir = get_results_dir(config, prot_name1)
+    df.to_csv(
+        os.path.join(output_dir, f"{filename}.csv"),
+        index=False,
+    )
 
     # ── timing ──
     elapsed = time.time() - t_start

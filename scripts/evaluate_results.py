@@ -371,11 +371,11 @@ def normalise_scores(frame: pd.DataFrame, path: Path, method: str,
 
 
 def infer_method(directory: Path) -> str:
-    if directory.name == "results":
+    if directory.name.endswith("results"):
         return "guided"
-    if directory.name == "results_unconditional":
+    if directory.name.endswith("results_unconditional"):
         return "unconditional"
-    raise ValueError("Input directory must be named results/ or results_unconditional/")
+    raise ValueError("Input directory must be named ...results/ or ...results_unconditional/")
 
 
 def summarize(base: Path, output: Path, order_override: str,
@@ -587,7 +587,7 @@ def save_results(data: dict[str, pd.DataFrame], output: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("directory", type=Path, help="results/ OR results_unconditional/")
+    parser.add_argument("directory", type=Path, help="...results/ OR ...results_unconditional/")
     parser.add_argument("--output", type=Path, default=None,
                         help="Output directory (default: <directory>/evaluation_summary/)")
     parser.add_argument("--attempts-per-file", type=int, default=None,

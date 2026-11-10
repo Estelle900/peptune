@@ -27,6 +27,7 @@ MODE="${2:-2}"
 MODEL="${3:-mcts}"
 LENGTH="${4:-100}"
 EPOCH="${5:-7}"
+USE_RELIABLE_SCORES="${6:-false}"
 
 cd "$HOME_LOC"
 
@@ -63,6 +64,10 @@ for PROT_NAME1 in $(python -c "from src.LNR_Sequences import LNR_Sequences as r;
       "+length=$LENGTH"
       "+epoch=$EPOCH"
   )
+
+  if [["$USE_RELIABLE_SCORES"=="use_reliable_scores" || "$USE_RELIABLE_SCORES"=="true" ]]; then
+    HYDRA_ARGS+=("+mcts.use_reliable_scores=true")
+  fi
 
   if [[ -n "$PROT_NAME2" ]]; then
       HYDRA_ARGS+=("+prot_name2=$PROT_NAME2")

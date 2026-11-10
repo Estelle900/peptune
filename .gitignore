@@ -1,7 +1,9 @@
 logs/
 results/
 results_legacy_mcts/
+supported_results_legacy_mcts/
 results_unconditional/
+supported_results_unconditional/
 quickstart_results/
 uvcache/
 data/

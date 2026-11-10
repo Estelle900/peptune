@@ -28,6 +28,7 @@ MODE="${3:-2}"
 MODEL="${4:-mcts}"
 LENGTH="${5:-100}"
 EPOCH="${6:-7}"
+USE_RELIABLE_SCORES="${7:-false}"
 
 cd "$HOME_LOC"
 
@@ -64,6 +65,10 @@ HYDRA_ARGS=(
     "+length=$LENGTH"
     "+epoch=$EPOCH"
 )
+
+if [["$USE_RELIABLE_SCORES"=="use_reliable_scores" || "$USE_RELIABLE_SCORES"=="true" ]]; then
+  HYDRA_ARGS+=("+mcts.use_reliable_scores=true")
+fi
 
 if [[ -n "$PROT_NAME2" ]]; then
     HYDRA_ARGS+=("+prot_name2=$PROT_NAME2")

@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:a100-80:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --time=5:00:00
 #SBATCH --output=logs/peptune-mcts-%j.out
 #SBATCH --error=logs/peptune-mcts-%j.err
 
@@ -27,6 +27,7 @@ MODE="${2:-2}"
 MODEL="${3:-mcts}"
 LENGTH="${4:-100}"
 EPOCH="${5:-7}"
+USE_RELIABLE_SCORES="${6:-false}"
 
 cd "$HOME_LOC"
 
@@ -55,7 +56,7 @@ nvidia-smi
 
 # Preserve the original Hydra arguments
 for PROT_NAME1 in gfap p53 tfr glp1 ncam; do
-  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/results/$PROT_NAME1"
+  mkdir -p "$HOME_LOC/logs" "$HOME_LOC/supported_results/$PROT_NAME1"
   HYDRA_ARGS=(
       "+prot_name1=$PROT_NAME1"
       "++mode=$MODE"
@@ -63,6 +64,10 @@ for PROT_NAME1 in gfap p53 tfr glp1 ncam; do
       "+length=$LENGTH"
       "+epoch=$EPOCH"
   )
+
+  if [["$USE_RELIABLE_SCORES"=="use_reliable_scores" || "$USE_RELIABLE_SCORES"=="true"]]; then
+    HYDRA_ARGS+=("+mcts.use_reliable_scores=true")
+  fi
 
   if [[ -n "$PROT_NAME2" ]]; then
       HYDRA_ARGS+=("+prot_name2=$PROT_NAME2")
