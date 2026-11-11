@@ -1,3 +1,6 @@
 [submodule "CPSea"]
 	path = CPSea
 	url = https://github.com/YZY010418/CPSea.git
+[submodule "WeightCode"]
+	path = WeightCode
+	url = https://github.com/Gen-Verse/WeightCode

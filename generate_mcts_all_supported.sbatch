@@ -65,7 +65,7 @@ for PROT_NAME1 in gfap p53 tfr glp1 ncam; do
       "+epoch=$EPOCH"
   )
 
-  if [["$USE_RELIABLE_SCORES"=="use_reliable_scores" || "$USE_RELIABLE_SCORES"=="true"]]; then
+  if [[ "$USE_RELIABLE_SCORES" == "use_reliable_scores" || "$USE_RELIABLE_SCORES" == "true" ]]; then
     HYDRA_ARGS+=("+mcts.use_reliable_scores=true")
   fi
 

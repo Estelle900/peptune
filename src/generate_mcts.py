@@ -198,13 +198,15 @@ def plot_data_with_distribution_seaborn(log1, log2=None,
         print(f"Plot saved to {save_path}")
     plt.show()
 
-def get_results_dir(config, prot_name):
+def get_results_dir(config, prot_name, supported=False):
     reliable = config.mcts.get("use_reliable_scores", False)
 
     folder = (
-        "results_reliable_scores"
-        if reliable else "results"
+        "supported_results"
+        if supported else "results"
     )
+    if reliable:
+        folder += "_reliable_scores"
 
     output_dir = os.path.join(
         config.base_path, folder, prot_name
@@ -292,7 +294,7 @@ def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, pro
 
     paretoFront = mcts.forward(rootNode)
 
-    output_dir = get_results_dir(config, prot_name1)
+    output_dir = get_results_dir(config, prot_name1, supported=prot_name1 in PROTEIN_SEQUENCES)
 
     output_log_path = os.path.join(
         output_dir, f"log_{filename}.csv"
@@ -350,14 +352,16 @@ def main(config):
     analyzer = PeptideAnalyzer()
     
     # Look up protein sequences from names
-    prot_seq1 = PROTEIN_SEQUENCES.get(prot_name1.lower(), LNR_SEQUENCES.get(prot_name1.lower()))
+    prot_name1 = prot_name1.lower()
+    supported = prot_name1 in PROTEIN_SEQUENCES
+    prot_seq1 = PROTEIN_SEQUENCES.get(prot_name1, LNR_SEQUENCES.get(prot_name1))
     prot_seq2 = PROTEIN_SEQUENCES.get(prot_name2.lower(), LNR_SEQUENCES.get(prot_name2.lower())) if prot_name2 else None
     
     if prot_seq1 is None:
-        raise ValueError(f"Protein '{prot_name1}' not found in PROTEIN_SEQUENCES dictionary. Available proteins: {list(PROTEIN_SEQUENCES.keys())}")
+        raise ValueError(f"Protein '{prot_name1}' not found in PROTEIN_SEQUENCES or LNR_SEQUENCES dictionary. Available proteins: {list(PROTEIN_SEQUENCES.keys())}")
     
     if prot_name2 and prot_seq2 is None:
-        raise ValueError(f"Protein '{prot_name2}' not found in PROTEIN_SEQUENCES dictionary. Available proteins: {list(PROTEIN_SEQUENCES.keys())}")
+        raise ValueError(f"Protein '{prot_name2}' not found in PROTEIN_SEQUENCES OR LNR_SEQUENCES dictionary. Available proteins: {list(PROTEIN_SEQUENCES.keys())}")
     
     print(f"Using protein 1: {prot_name1}")
     if prot_name2:
@@ -414,7 +418,7 @@ def main(config):
 
     df = pd.DataFrame(generation_results, columns=columns)
 
-    output_dir = get_results_dir(config, prot_name1)
+    output_dir = get_results_dir(config, prot_name1, supported=supported)
     df.to_csv(
         os.path.join(output_dir, f"{filename}.csv"),
         index=False,

@@ -1,5 +1,7 @@
 logs/
 results/
+supported_results/
+supported_results_reliable_scores/
 results_legacy_mcts/
 supported_results_legacy_mcts/
 results_unconditional/
@@ -11,3 +13,5 @@ checkpoints/
 **/*.pt
 **/*.log
 **/__pycache__/
+PeptideBERT/
+xgboost_results/
