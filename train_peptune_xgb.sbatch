@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=peptune-train-xgb
 #SBATCH --partition=long
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=logs/peptune-train-xgb-%j.out
 #SBATCH --error=logs/peptune-train-xgb-%j.err
 #
@@ -23,7 +23,23 @@ else
     exit 1
 fi
 
-OUTPUT_DIR="${SUBMIT_DIR}/xgboost_results"
+OUTPUT_DIR="${1:-${SUBMIT_DIR}/xgboost_results}"
+ECFP4="${2:-false}"
+
+ECFP4_ARGS=()
+
+case "${ECFP4,,}" in
+    true|1|yes)
+        ECFP4_ARGS=(--ecfp4)
+        ;;
+    false|0|no)
+        ;;
+    *)
+        echo "ERROR: ECFP4 must be true or false" >&2
+        exit 1
+        ;;
+esac
+
 mkdir -p "${OUTPUT_DIR}"
 
 source .venv/bin/activate
@@ -48,10 +64,11 @@ srun python -u "${TRAIN_SCRIPT}" \
     --device cpu \
     --batch-size 16 \
     --n-jobs "${SLURM_CPUS_PER_TASK:-8}" \
-    --n-trials 50 \
+    --n-trials 5000 \
     --max-rounds 1000 \
     --early-stopping-rounds 40 \
     --threshold-mode validation_f1 \
+    "${ECFP4_ARGS[@]}" \
     --seed 42
 
 echo "Training finished. Held-out test metrics: ${OUTPUT_DIR}/combined_test_metrics.json"

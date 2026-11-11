@@ -34,7 +34,9 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from rdkit import Chem, RDLogger
+import rdkit
+from rdkit import Chem, RDLogger, rdBase
+from rdkit.Chem import rdFingerprintGenerator
 from scipy.stats import spearmanr
 from sklearn.metrics import (
     accuracy_score, average_precision_score, confusion_matrix, f1_score,
@@ -305,8 +307,62 @@ class PepTuneEmbedder:
         return np.nan_to_num(out, nan=0, posinf=np.finfo(np.float32).max,
                              neginf=np.finfo(np.float32).min)
 
+class ECFP4Embedder:
+    def __init__(
+        self,
+        n_bits: int = 1024,
+        include_chirality: bool = False,
+    ):
+        self.n_bits = n_bits
+        self.include_chirality = include_chirality
 
-def get_features(task: str, smiles: list[str], embedder: PepTuneEmbedder,
+        self.generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2,                       # ECFP4
+            fpSize=n_bits,                  # 1024 dimensions
+            includeChirality=include_chirality,
+        )
+
+        # Compatible with your existing cache hashing
+        self.signature = {
+            "name": "ECFP4_count",
+            "radius": 2,
+            "n_bits": n_bits,
+            "include_chirality": include_chirality,
+            "rdkit_version": rdkit.__version__,
+        }
+
+    def transform(
+        self,
+        smiles: list[str],
+        batch_size: int = 256,
+    ) -> np.ndarray:
+
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        X = np.zeros(
+            (len(smiles), self.n_bits),
+            dtype=np.float32,
+        )
+
+        for start in range(0, len(smiles), batch_size):
+            end = min(start + batch_size, len(smiles))
+
+            for i in range(start, end):
+                mol = Chem.MolFromSmiles(smiles[i])
+
+                if mol is None:
+                    raise ValueError(
+                        f"Invalid SMILES at index {i}: {smiles[i]}"
+                    )
+
+                # Count-based, NOT binary
+                X[i] = self.generator.GetCountFingerprintAsNumPy(mol)
+
+        return X
+
+
+def get_features(task: str, smiles: list[str], embedder,
                  batch_size: int, cache_dir: Path, cache: bool) -> np.ndarray:
     sig = json.dumps(embedder.signature, sort_keys=True).encode()
     h = hashlib.sha256(sig)
@@ -617,6 +673,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-cache", action="store_true", help="Do not save/read embedding cache")
     p.add_argument("--install-classifiers", action="store_true",
                    help="Opt-in copy to src/scoring/functions/classifiers; backs up prior files")
+    p.add_argument("--ecfp4", action="store_true", help="Use count-based ECFP4 fingerprint instead of trained embedder. NOT differentiable.")
     args = p.parse_args(argv)
     args.repo_root = args.repo_root.resolve()
     args.data_dir = (args.repo_root / args.data_dir).resolve()
@@ -635,8 +692,7 @@ def main(argv: list[str] | None = None) -> None:
     # Load once so the frozen feature encoder is shared among all three heads.
     LOGGER.addHandler(logging.StreamHandler(sys.stdout))
     LOGGER.setLevel(logging.INFO)
-    embedder = PepTuneEmbedder(args.repo_root, args.model_id, args.device,
-                              args.max_tokens)
+    embedder = ECFP4Embedder(n_bits=1024, include_chirality=False) if args.ecfp4 else PepTuneEmbedder(args.repo_root, args.model_id, args.device, args.max_tokens)
     summary = {}
     for task in args.tasks:
         summary[task] = train_task(task, args, embedder)

@@ -15,3 +15,4 @@ checkpoints/
 **/__pycache__/
 PeptideBERT/
 xgboost_results/
+xgboost_results_ecfp4/
