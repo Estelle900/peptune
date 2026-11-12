@@ -13,6 +13,6 @@ checkpoints/
 **/*.pt
 **/*.log
 **/__pycache__/
-PeptideBERT/
+xgboost_data/
 xgboost_results/
 xgboost_results_ecfp4/

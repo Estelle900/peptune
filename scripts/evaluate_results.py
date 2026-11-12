@@ -371,7 +371,7 @@ def normalise_scores(frame: pd.DataFrame, path: Path, method: str,
 
 
 def infer_method(directory: Path) -> str:
-    if directory.name.endswith("results"):
+    if directory.name.endswith("results") or directory.name.endswith("results_reliable_scores"):
         return "guided"
     if directory.name.endswith("results_unconditional"):
         return "unconditional"
@@ -587,7 +587,7 @@ def save_results(data: dict[str, pd.DataFrame], output: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("directory", type=Path, help="...results/ OR ...results_unconditional/")
+    parser.add_argument("directory", type=Path, help="...results/ OR ...results_unconditional/ OR ...results_reliable_scores")
     parser.add_argument("--output", type=Path, default=None,
                         help="Output directory (default: <directory>/evaluation_summary/)")
     parser.add_argument("--attempts-per-file", type=int, default=None,

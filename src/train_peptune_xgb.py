@@ -187,7 +187,7 @@ def aa_to_smiles(sequence: str) -> str | None:
     return Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
 
 
-def prepare_dataset(task: str, data_dir: Path, encoding: str) -> tuple[pd.DataFrame, dict]:
+def prepare_npz_dataset(task: str, data_dir: Path, encoding: str) -> tuple[pd.DataFrame, dict]:
     positive_path = choose_file(data_dir, TASKS[task][0])
     negative_path = choose_file(data_dir, TASKS[task][1])
     positive, negative = read_npz(positive_path), read_npz(negative_path)
@@ -231,12 +231,239 @@ def prepare_dataset(task: str, data_dir: Path, encoding: str) -> tuple[pd.DataFr
                 stats["negative_count"], len(conflicts))
     return frame, stats
 
+def read_pepland_txt(path: Path) -> pd.DataFrame:
+    """Read headerless PepLand sequence,label files."""
 
-def stratified_70_20_10(y: np.ndarray, seed: int) -> dict[str, np.ndarray]:
+    raw = pd.read_csv(
+        path,
+        header=None,
+        names=["sequence", "label"],
+        dtype=str,
+    )
+
+    raw["sequence"] = raw["sequence"].str.strip().str.upper()
+
+    labels = pd.to_numeric(raw["label"], errors="raise")
+
+    if not labels.isin([0, 1]).all():
+        raise ValueError(f"{path}: expected binary 0/1 labels")
+
+    raw["label"] = labels.astype(int)
+
+    # Convert amino acid sequences into PepTune-compatible SMILES
+    raw["smiles"] = raw["sequence"].map(aa_to_smiles)
+
+    # Discard invalid sequences
+    result = raw.dropna(subset=["smiles"]).copy()
+
+    result["source"] = path.name
+
+    LOGGER.info(
+        "%s: retained %d/%d valid peptides",
+        path.name, len(result), len(raw)
+    )
+
+    return result[["sequence", "smiles", "label", "source"]]
+
+def read_pepland_nc_cpp(path: Path) -> pd.DataFrame:
+    """Read non-canonical CPP molecular structures and binary labels."""
+
+    raw = pd.read_csv(path, dtype=str)
+
+    by_name = {
+        str(c).strip().lower(): c
+        for c in raw.columns
+    }
+
+    mol_key = next(
+        (by_name[c] for c in (
+            "smiles", "smi", "peptide_smiles",
+            "canonical_smiles", "molecule",
+            "sequence", "seq",
+        ) if c in by_name),
+        None,
+    )
+
+    y_key = next(
+        (by_name[c] for c in (
+            "label", "class", "target",
+            "cpp", "is_cpp", "permeability", "y",
+        ) if c in by_name),
+        None,
+    )
+
+    # Allow headerless two-column SMILES,label files.
+    if mol_key is None or y_key is None:
+        if raw.shape[1] != 2:
+            raise ValueError(
+                f"{path}: cannot identify SMILES/label columns. "
+                f"Found {list(raw.columns)}"
+            )
+
+        raw = pd.read_csv(
+            path,
+            header=None,
+            names=["smiles", "label"],
+            dtype=str,
+        )
+
+        mol_key, y_key = "smiles", "label"
+
+    values = raw[mol_key].fillna("").astype(str).str.strip()
+    labels = pd.to_numeric(raw[y_key], errors="raise")
+
+    if not labels.isin([0, 1]).all():
+        raise ValueError(
+            f"{path}: expected binary 0/1 CPP labels"
+        )
+
+    is_sequence = str(mol_key).strip().lower() in (
+        "sequence", "seq"
+    )
+
+    rows = []
+
+    for value, label in zip(values, labels):
+        if is_sequence:
+            sequence = value.upper()
+            smiles = aa_to_smiles(sequence)
+        else:
+            sequence = ""
+            mol = Chem.MolFromSmiles(value) if value else None
+            smiles = (
+                Chem.MolToSmiles(
+                    mol,
+                    isomericSmiles=True,
+                    canonical=True,
+                )
+                if mol is not None else None
+            )
+
+        if smiles is not None:
+            rows.append(
+                (sequence, smiles, int(label), path.name)
+            )
+
+    LOGGER.info(
+        "%s: retained %d/%d valid molecules",
+        path.name, len(rows), len(raw)
+    )
+
+    return pd.DataFrame(
+        rows,
+        columns=["sequence", "smiles", "label", "source"],
+    )
+
+def merge_labeled_frames(
+    frames: list[pd.DataFrame],
+    task: str,
+) -> tuple[pd.DataFrame, int]:
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    # Find molecules with contradictory labels.
+    label_counts = combined.groupby("smiles")["label"].nunique()
+
+    conflicts = set(
+        label_counts[label_counts > 1].index
+    )
+
+    # Drop all examples of molecules with conflicting labels.
+    combined = combined[
+        ~combined["smiles"].isin(conflicts)
+    ]
+
+    # Keep one example per molecule.
+    combined = combined.drop_duplicates(
+        subset="smiles"
+    ).reset_index(drop=True)
+
+    counts = combined["label"].value_counts()
+
+    if (
+        len(combined) < 20
+        or len(counts) != 2
+        or counts.min() < 10
+    ):
+        raise ValueError(
+            f"{task}: insufficient examples per class: "
+            f"{counts.to_dict()}"
+        )
+
+    return combined, len(conflicts)
+
+def prepare_dataset(
+    task: str,
+    data_dir: Path,
+    encoding: str,
+    pepland_data_dir: Path,
+) -> tuple[pd.DataFrame, dict]:
+
+    frames = []
+    original_stats = {}
+
+    if task == "permeability":
+
+        # Canonical cell-penetrating peptides
+        frames.append(
+            read_pepland_txt(
+                pepland_data_dir / "c-CPP.txt"
+            )
+        )
+
+        # Non-canonical cell-penetrating peptides
+        nc_path = pepland_data_dir / "nc-CPP.csv"
+
+        if nc_path.is_file():
+            frames.append(
+                read_pepland_nc_cpp(nc_path)
+            )
+
+    else:
+        # Existing PeptideBERT data loader
+        base, original_stats = prepare_npz_dataset(
+            task, data_dir, encoding
+        )
+
+        base["source"] = "peptidebert_npz"
+        frames.append(base)
+
+        if task == "solubility":
+            frames.append(
+                read_pepland_txt(
+                    pepland_data_dir / "c-Sol.txt"
+                )
+            )
+
+    # Deduplicate before splitting.
+    frame, n_conflicts = merge_labeled_frames(
+        frames, task
+    )
+
+    stats = {
+        "original_dataset": original_stats,
+        "sources": frame["source"].value_counts().to_dict(),
+        "conflicting_smiles_dropped": n_conflicts,
+        "unique_molecules_used": len(frame),
+        "positive_count": int(frame["label"].sum()),
+        "negative_count": int((frame["label"] == 0).sum()),
+    }
+
+    LOGGER.info(
+        "%s: %d unique molecules, %d positive, %d negative",
+        task,
+        len(frame),
+        stats["positive_count"],
+        stats["negative_count"],
+    )
+
+    return frame, stats
+
+def stratified(y: np.ndarray, tvt=(.8, .1, .1), seed: int = 42) -> dict[str, np.ndarray]:
     indices = np.arange(len(y))
-    train_val, test = train_test_split(indices, test_size=0.10,
+    train_val, test = train_test_split(indices, test_size=tvt[2],
                                        random_state=seed, stratify=y)
-    train, val = train_test_split(train_val, test_size=(2.0 / 9.0),
+    train, val = train_test_split(train_val, test_size=(tvt[1] / (tvt[0]+tvt[1])),
                                   random_state=seed, stratify=y[train_val])
     return {"train": np.asarray(train), "val": np.asarray(val), "test": np.asarray(test)}
 
@@ -521,10 +748,10 @@ def train_task(task: str, args: argparse.Namespace, embedder: PepTuneEmbedder) -
     folder = args.output_dir / task
     folder.mkdir(parents=True, exist_ok=True)
     configure_task_log(folder)
-    LOGGER.info("Starting %s | seed=%s | 70/20/10 train/val/test", task, args.seed)
-    frame, dataset_stats = prepare_dataset(task, args.data_dir, args.encoding)
+    LOGGER.info("Starting %s | seed=%s | 80/10/10 train/val/test", task, args.seed)
+    frame, dataset_stats = prepare_dataset(task, args.data_dir, args.encoding, args.data_dir)
     y = frame["label"].to_numpy(dtype=np.int32)
-    splits = stratified_70_20_10(y, args.seed)
+    splits = stratified(y, tvt=(.8, .1, .1), seed=args.seed)
     frame["split"] = ""
     for name, idx in splits.items(): frame.loc[idx, "split"] = name
     frame.to_csv(folder / "split_manifest.csv", index=False)
@@ -540,11 +767,15 @@ def train_task(task: str, args: argparse.Namespace, embedder: PepTuneEmbedder) -
     LOGGER.info("Feature matrix: %s", X.shape)
     write_json(folder / "feature_provenance.json", {
         **embedder.signature, "feature_dim": X.shape[1],
-        "input_data": str(args.data_dir), "data_split": [0.7, 0.2, 0.1],
+        "input_data": {
+            "peptidebert": str(args.data_dir),
+            "pepland": str(args.pepland_data_dir),
+        },
+        "data_split": [0.7, 0.2, 0.1],
     })
 
     dm = {name: xgb.DMatrix(X[idx], label=y[idx]) for name, idx in splits.items()}
-    p_thr = PAPER_RAW_POSITIVE_THRESHOLDS[task]
+    p_thr = PAPER_RAW_POSITIVE_THRESHOLDS.get(task, 0.5) # permeability default not paper-derived; uninformative fallback
     sampler = optuna.samplers.TPESampler(seed=args.seed)
     study = optuna.create_study(direction="maximize", sampler=sampler,
                                 study_name=f"{task}_70_20_10")
@@ -599,7 +830,8 @@ def train_task(task: str, args: argparse.Namespace, embedder: PepTuneEmbedder) -
         "best_round_0_indexed": int(booster.best_iteration),
         "threshold_mode": args.threshold_mode,
         "threshold_positive_class": threshold,
-        "paper_threshold_positive_class": p_thr,
+        "paper_threshold_positive_class": (p_thr if task in PAPER_RAW_POSITIVE_THRESHOLDS else None),
+        "default_threshold_positive_class": p_thr,
         "paper_hemolysis_reward_cutoff": 0.8 if task == "hemolysis" else None,
         "selection_metric": "validation positive-class F1",
         "validation_early_stopping_metric": "logloss",
@@ -652,17 +884,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--repo-root", type=Path, default=Path("."),
                    help="Root directory of the programmablebio/peptune checkout")
-    p.add_argument("--data-dir", type=Path, default=Path("PeptideBERT/data"),
+    p.add_argument("--data-dir", type=Path, default=Path("xgboost_data"),
                    help="Directory containing the six raw +/- .npz files")
+    p.add_argument("--pepland-data-dir", type=Path, default=Path("xgboost_data"),
+                   help="Directory containing PepLand c-Sol.txt, c-CPP.txt and nc-CPP.csv")
     p.add_argument("--output-dir", type=Path, default=Path("xgboost_results"))
-    p.add_argument("--tasks", nargs="+", default=["solubility", "hemolysis", "nonfouling"],
+    p.add_argument("--tasks", nargs="+", default=["solubility", "hemolysis", "nonfouling", "permeability"],
                    choices=list(TASKS))
     p.add_argument("--encoding", choices=["auto", "dashboard", "peptidebert"],
                    default="auto", help="Encoding of *numeric* .npz peptide arrays")
     p.add_argument("--model-id", default="aaronfeller/PeptideCLM-23M-all")
     p.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, ...")
     p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--max-tokens", type=int, default=512)
+    p.add_argument("--max-tokens", type=lambda v: int(v) if v else None, default=None)
     p.add_argument("--n-trials", type=int, default=50)
     p.add_argument("--max-rounds", type=int, default=1000)
     p.add_argument("--early-stopping-rounds", type=int, default=40)
@@ -678,7 +912,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.repo_root = args.repo_root.resolve()
     args.data_dir = (args.repo_root / args.data_dir).resolve()
     args.output_dir = (args.repo_root / args.output_dir).resolve()
-    for name in ("batch_size", "max_tokens", "n_trials", "max_rounds", "early_stopping_rounds", "n_jobs"):
+    for name in ("batch_size", "n_trials", "max_rounds", "early_stopping_rounds", "n_jobs"):
         if getattr(args, name) < 1:
             p.error(f"--{name.replace('_', '-')} must be positive")
     return args

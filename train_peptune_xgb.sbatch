@@ -15,9 +15,9 @@ set -euo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 TRAIN_SCRIPT="${SUBMIT_DIR}/src/train_peptune_xgb.py"
 
-# Adjust this if you keep PeptideBERT/data elsewhere.
-if [[ -d "${SUBMIT_DIR}/PeptideBERT/data" ]]; then
-    DATA_DIR="${SUBMIT_DIR}/PeptideBERT/data"
+# Adjust this if you keep xgboost_data elsewhere.
+if [[ -d "${SUBMIT_DIR}/xgboost_data" ]]; then
+    DATA_DIR="${SUBMIT_DIR}/xgboost_data"
 else
     echo "ERROR: Missing PeptideBERT/data under the repository root or src/." >&2
     exit 1
@@ -64,7 +64,7 @@ srun python -u "${TRAIN_SCRIPT}" \
     --device cpu \
     --batch-size 16 \
     --n-jobs "${SLURM_CPUS_PER_TASK:-8}" \
-    --n-trials 5000 \
+    --n-trials 500 \
     --max-rounds 1000 \
     --early-stopping-rounds 40 \
     --threshold-mode validation_f1 \

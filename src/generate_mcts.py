@@ -22,6 +22,8 @@ import numpy as np
 # LNR testset
 from LNR_Sequences import LNR_Sequences as LNR_SEQUENCES
 
+from scoring.scoring_functions import ScoringFunctions
+
 # Protein sequence dictionary
 PROTEIN_SEQUENCES = {
     'amhr': 'MLGSLGLWALLPTAVEAPPNRRTCVFFEAPGVRGSTKTLGELLDTGTELPRAIRCLYSRCCFGIWNLTQDRAQVEMQGCRDSDEPGCESLHCDPSPRAHPSPGSTLFTCSCGTDFCNANYSHLPPPGSPGTPGSQGPQAAPGESIWMALVLLGLFLLLLLLLGSIILALLQRKNYRVRGEPVPEPRPDSGRDWSVELQELPELCFSQVIREGGHAVVWAGQLQGKLVAIKAFPPRSVAQFQAERALYELPGLQHDHIVRFITASRGGPGRLLSGPLLVLELHPKGSLCHYLTQYTSDWGSSLRMALSLAQGLAFLHEERWQNGQYKPGIAHRDLSSQNVLIREDGSCAIGDLGLALVLPGLTQPPAWTPTQPQGPAAIMEAGTQRYMAPELLDKTLDLQDWGMALRRADIYSLALLLWEILSRCPDLRPDSSPPPFQLAYEAELGNTPTSDELWALAVQERRRPYIPSTWRCFATDPDGLRELLEDCWDADPEARLTAECVQQRLAALAHPQESHPFPESCPRGCPPLCPEDCTSIPAPTILPCRPQRSACHFSVQQGPCSRNPQPACTLSPV',
@@ -75,7 +77,7 @@ def plot_data(log1, log2=None,
         save_path (str): Path to save the plot. Defaults to None.
         label1 (str): Label for the first dataset. Defaults to "Log 1".
         label2 (str, optional): Label for the second dataset. Defaults to None.
-        title (str): Title of the plot. Defaults to "Mean Values Over Iterations".
+        title (str): Title of the plot. Defaults to "Fraction of Valid Peptides Over Iterations".
         palette (dict, optional): A dictionary defining custom colors for datasets. Defaults to None.
     """
     # Prepare data for log1
@@ -287,8 +289,6 @@ def generate_valid_mcts(config, mdlm, prot1=None, prot2=None, filename=None, pro
         mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, prot_seqs=[prot1, prot2], num_func=num_func)
     elif prot1 is not None: 
         mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, prot_seqs=[prot1], num_func=num_func)
-    elif config.mcts.single:
-        mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, num_func=num_func)
     else:
         mcts = MCTS(config=config, max_sequence_length=max_sequence_length, mdlm=mdlm, score_func_names=score_func_names, num_func=num_func)
 
@@ -370,6 +370,34 @@ def main(config):
     t_start = time.time()
     paretoFront, input_array, score_func_names = generate_valid_mcts(config, mdlm, prot_seq1, prot_seq2, filename, prot_name1, prot_name2)
 
+    # Evaluate ALL metrics, regardless of which MCTS objectives were enabled.
+    eval_score_func_names = ["permeability", "binding_affinity1", "solubility", "hemolysis", "nonfouling"]
+
+    if prot_seq2 is not None:
+        eval_score_func_names.append("binding_affinity2")
+
+    # Evaluate generated peptides using the full scoring suite.
+    sequences = list(paretoFront.keys())
+
+    if sequences:
+        prot_seqs = [prot_seq1]
+        if prot_seq2 is not None:
+            prot_seqs.append(prot_seq2)
+
+        evaluator = ScoringFunctions(
+            score_func_names=eval_score_func_names,
+            prot_seqs=prot_seqs,
+            device=mdlm.device,
+        )
+
+        with torch.no_grad():
+            eval_scores = evaluator(input_seqs=sequences)
+    else:
+        eval_scores = np.empty(
+            (0, len(eval_score_func_names)),
+            dtype=np.float32,
+        )
+
     score_labels = {
         "binding_affinity1": "Binding Affinity",
         "binding_affinity2": "Binding Affinity 2",
@@ -383,11 +411,11 @@ def main(config):
         "Generated SMILES",
         "Perplexity",
         "Peptide Sequence",
-    ] + [score_labels[name] for name in score_func_names]
+    ] + [score_labels[name] for name in eval_score_func_names]
 
     generation_results = []
 
-    for sequence, v in paretoFront.items():
+    for i, (sequence, v) in enumerate(paretoFront.items()):
         generated_array = v["token_ids"].to(mdlm.device)
 
         perplexity = mdlm.compute_masked_perplexity(
@@ -396,7 +424,7 @@ def main(config):
         perplexity = round(perplexity, 4)
 
         aa_seq, seq_length = analyzer.analyze_structure(sequence)
-        scores = list(v["scores"])
+        scores = eval_scores[i].tolist()
 
         generation_results.append(
             [sequence, perplexity, aa_seq] + scores
@@ -404,7 +432,7 @@ def main(config):
 
         score_text = " | ".join(
             f"{score_labels[name]}: {score}"
-            for name, score in zip(score_func_names, scores)
+            for name, score in zip(eval_score_func_names, scores)
         )
 
         print(
