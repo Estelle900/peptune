@@ -59,7 +59,7 @@ srun python -u "${TRAIN_SCRIPT}" \
     --repo-root "${SUBMIT_DIR}" \
     --data-dir "${DATA_DIR}" \
     --output-dir "${OUTPUT_DIR}" \
-    --tasks solubility hemolysis nonfouling \
+    --tasks permeability solubility hemolysis nonfouling \
     --encoding auto \
     --device cpu \
     --batch-size 16 \

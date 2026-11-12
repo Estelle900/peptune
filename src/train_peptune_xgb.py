@@ -265,94 +265,63 @@ def read_pepland_txt(path: Path) -> pd.DataFrame:
 
     return result[["sequence", "smiles", "label", "source"]]
 
-def read_pepland_nc_cpp(path: Path) -> pd.DataFrame:
-    """Read non-canonical CPP molecular structures and binary labels."""
+def read_pepland_nc_cpp(
+    path: Path,
+    target_col: str = "PAMPA",
+) -> pd.DataFrame:
+    """Load cyclic-peptide permeability regression data."""
 
-    raw = pd.read_csv(path, dtype=str)
+    raw = pd.read_csv(path)
 
-    by_name = {
-        str(c).strip().lower(): c
-        for c in raw.columns
-    }
+    if target_col not in raw.columns:
+        raise ValueError(f"Missing column: {target_col}")
 
-    mol_key = next(
-        (by_name[c] for c in (
-            "smiles", "smi", "peptide_smiles",
-            "canonical_smiles", "molecule",
-            "sequence", "seq",
-        ) if c in by_name),
-        None,
+    raw["label"] = pd.to_numeric(
+        raw[target_col], errors="coerce"
     )
 
-    y_key = next(
-        (by_name[c] for c in (
-            "label", "class", "target",
-            "cpp", "is_cpp", "permeability", "y",
-        ) if c in by_name),
-        None,
-    )
+    raw = raw.dropna(subset=["SMILES", "label"]).copy()
+    raw = raw[np.isfinite(raw["label"])].copy()
 
-    # Allow headerless two-column SMILES,label files.
-    if mol_key is None or y_key is None:
-        if raw.shape[1] != 2:
-            raise ValueError(
-                f"{path}: cannot identify SMILES/label columns. "
-                f"Found {list(raw.columns)}"
-            )
+    records = []
 
-        raw = pd.read_csv(
-            path,
-            header=None,
-            names=["smiles", "label"],
-            dtype=str,
+    for _, row in raw.iterrows():
+        mol = Chem.MolFromSmiles(str(row["SMILES"]))
+
+        if mol is None:
+            continue
+
+        smiles = Chem.MolToSmiles(
+            mol,
+            canonical=True,
+            isomericSmiles=True,
         )
 
-        mol_key, y_key = "smiles", "label"
+        records.append({
+            "sequence": str(row["Sequence"]),
+            "smiles": smiles,
+            "label": float(row["label"]),
+            "source": str(row["Source"]),
+        })
 
-    values = raw[mol_key].fillna("").astype(str).str.strip()
-    labels = pd.to_numeric(raw[y_key], errors="raise")
+    frame = pd.DataFrame(records)
 
-    if not labels.isin([0, 1]).all():
-        raise ValueError(
-            f"{path}: expected binary 0/1 CPP labels"
-        )
-
-    is_sequence = str(mol_key).strip().lower() in (
-        "sequence", "seq"
-    )
-
-    rows = []
-
-    for value, label in zip(values, labels):
-        if is_sequence:
-            sequence = value.upper()
-            smiles = aa_to_smiles(sequence)
-        else:
-            sequence = ""
-            mol = Chem.MolFromSmiles(value) if value else None
-            smiles = (
-                Chem.MolToSmiles(
-                    mol,
-                    isomericSmiles=True,
-                    canonical=True,
-                )
-                if mol is not None else None
-            )
-
-        if smiles is not None:
-            rows.append(
-                (sequence, smiles, int(label), path.name)
-            )
+    # Aggregate repeated molecular structures.
+    frame = frame.groupby(
+        "smiles", as_index=False
+    ).agg({
+        "sequence": "first",
+        "label": "median",
+        "source": "first",
+    })
 
     LOGGER.info(
-        "%s: retained %d/%d valid molecules",
-        path.name, len(rows), len(raw)
+        "Loaded %d unique cyclic peptides for %s regression",
+        len(frame),
+        target_col,
     )
 
-    return pd.DataFrame(
-        rows,
-        columns=["sequence", "smiles", "label", "source"],
-    )
+    return frame
 
 def merge_labeled_frames(
     frames: list[pd.DataFrame],
@@ -503,7 +472,7 @@ class PepTuneEmbedder:
         LOGGER.info("Loading %s on %s (first run may download weights)", hf_model, self.device)
         self.model = AutoModelForMaskedLM.from_pretrained(hf_model).roformer.to(self.device).eval()
         self.torch = torch
-        self.max_tokens = max_tokens
+        self.max_tokens = min(max_tokens, self.model.config.max_position_embeddings) if max_tokens else self.model.config.max_position_embeddings
         self.model_name = hf_model
         self.signature = {
             "model": hf_model,
@@ -878,6 +847,187 @@ def train_task(task: str, args: argparse.Namespace, embedder: PepTuneEmbedder) -
         LOGGER.info("Installed booster at %s", dest)
     return all_metrics["test"]
 
+def train_permeability(args, embedder):
+    folder = args.output_dir / "permeability"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    configure_task_log(folder)
+
+    frame = read_pepland_nc_cpp(
+        args.pepland_data_dir / "nc-CPP.csv",
+        target_col="PAMPA",
+    )
+
+    y = frame["label"].to_numpy(dtype=np.float32)
+
+    # 80/10/10 split, after molecular deduplication.
+    indices = np.arange(len(frame))
+
+    train_val, test = train_test_split(
+        indices, test_size=0.1, random_state=args.seed
+    )
+
+    train, val = train_test_split(
+        train_val,
+        test_size=1 / 9,
+        random_state=args.seed,
+    )
+
+    splits = {
+        "train": train,
+        "val": val,
+        "test": test,
+    }
+
+    frame["split"] = ""
+    for name, idx in splits.items():
+        frame.loc[idx, "split"] = name
+
+    frame.to_csv(folder / "split_manifest.csv", index=False)
+
+    X = get_features(
+        "permeability",
+        frame.smiles.tolist(),
+        embedder,
+        args.batch_size,
+        args.output_dir / "embedding_cache",
+        not args.no_cache,
+    )
+
+    dm = {
+        name: xgb.DMatrix(X[idx], label=y[idx])
+        for name, idx in splits.items()
+    }
+
+    def fit_regression(params):
+        history = {}
+
+        booster = xgb.train(
+            params,
+            dm["train"],
+            num_boost_round=args.max_rounds,
+            evals=[
+                (dm["train"], "train"),
+                (dm["val"], "val"),
+            ],
+            evals_result=history,
+            callbacks=[
+                xgb.callback.EarlyStopping(
+                    rounds=args.early_stopping_rounds,
+                    metric_name="rmse",
+                    data_name="val",
+                    save_best=True,
+                )
+            ],
+            verbose_eval=False,
+        )
+
+        return booster, history
+
+    def objective(trial):
+        params = trial_params(
+            trial, args.seed, args.n_jobs
+        )
+
+        params.update({
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+        })
+
+        booster, _ = fit_regression(params)
+
+        pred = booster.predict(dm["val"])
+
+        rmse = float(np.sqrt(
+            mean_squared_error(y[val], pred)
+        ))
+
+        return rmse
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(
+            seed=args.seed
+        ),
+    )
+
+    study.optimize(
+        objective,
+        n_trials=args.n_trials,
+    )
+
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "tree_method": "hist",
+        "seed": args.seed,
+        "nthread": args.n_jobs,
+        "verbosity": 0,
+        **study.best_params,
+    }
+
+    booster, history = fit_regression(params)
+
+    model_path = folder / "permeability-xgboost.json"
+    booster.save_model(str(model_path))
+
+    from sklearn.metrics import (
+        mean_absolute_error,
+        r2_score,
+    )
+
+    metrics = {}
+
+    for name, idx in splits.items():
+        pred = booster.predict(dm[name])
+
+        metrics[name] = {
+            "rmse": float(np.sqrt(
+                mean_squared_error(y[idx], pred)
+            )),
+            "mae": float(
+                mean_absolute_error(y[idx], pred)
+            ),
+            "r2": float(
+                r2_score(y[idx], pred)
+            ),
+            "spearman": float(
+                spearmanr(y[idx], pred).statistic
+            ),
+        }
+
+        result = frame.loc[
+            idx, ["smiles", "label", "source"]
+        ].copy()
+
+        result["predicted_permeability"] = pred
+
+        result.to_csv(
+            folder / f"{name}_predictions.csv",
+            index=False,
+        )
+
+        LOGGER.info("%s: %s", name, metrics[name])
+
+    write_json(folder / "metrics.json", metrics)
+    write_json(folder / "best_params.json", {
+        "params": params,
+        "best_trial": study.best_trial.number,
+        "best_iteration": int(booster.best_iteration),
+        "target": "PAMPA",
+        "objective": "reg:squarederror",
+    })
+
+    study.trials_dataframe().to_csv(
+        folder / "optuna_trials.csv", index=False
+    )
+
+    pd.DataFrame({
+        "train_rmse": history["train"]["rmse"],
+        "val_rmse": history["val"]["rmse"],
+    }).to_csv(folder / "learning_curve.csv", index=False)
+
+    return metrics["test"]
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
@@ -890,7 +1040,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Directory containing PepLand c-Sol.txt, c-CPP.txt and nc-CPP.csv")
     p.add_argument("--output-dir", type=Path, default=Path("xgboost_results"))
     p.add_argument("--tasks", nargs="+", default=["solubility", "hemolysis", "nonfouling", "permeability"],
-                   choices=list(TASKS))
+                   choices=[*TASKS, "permeability"])
     p.add_argument("--encoding", choices=["auto", "dashboard", "peptidebert"],
                    default="auto", help="Encoding of *numeric* .npz peptide arrays")
     p.add_argument("--model-id", default="aaronfeller/PeptideCLM-23M-all")
@@ -929,8 +1079,11 @@ def main(argv: list[str] | None = None) -> None:
     embedder = ECFP4Embedder(n_bits=1024, include_chirality=False) if args.ecfp4 else PepTuneEmbedder(args.repo_root, args.model_id, args.device, args.max_tokens)
     summary = {}
     for task in args.tasks:
-        summary[task] = train_task(task, args, embedder)
-    write_json(args.output_dir / "combined_test_metrics.json", summary)
+        if task == "permeability":
+            summary[task] = train_permeability(args, embedder)
+        else:
+            summary[task] = train_task(task, args, embedder)
+        write_json(args.output_dir / "combined_test_metrics.json", summary)
     LOGGER.info("Finished; test results at %s", args.output_dir / "combined_test_metrics.json")
 
 
