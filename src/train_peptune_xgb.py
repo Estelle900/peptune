@@ -41,7 +41,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import (
     accuracy_score, average_precision_score, confusion_matrix, f1_score,
     log_loss, mean_squared_error, precision_score, recall_score, roc_auc_score,
-    roc_curve, precision_recall_curve,
+    roc_curve, precision_recall_curve, mean_absolute_error, r2_score
 )
 from sklearn.model_selection import train_test_split
 
@@ -233,7 +233,6 @@ def prepare_npz_dataset(task: str, data_dir: Path, encoding: str) -> tuple[pd.Da
 
 def read_pepland_txt(path: Path) -> pd.DataFrame:
     """Read headerless PepLand sequence,label files."""
-
     raw = pd.read_csv(
         path,
         header=None,
@@ -249,20 +248,15 @@ def read_pepland_txt(path: Path) -> pd.DataFrame:
         raise ValueError(f"{path}: expected binary 0/1 labels")
 
     raw["label"] = labels.astype(int)
-
     # Convert amino acid sequences into PepTune-compatible SMILES
     raw["smiles"] = raw["sequence"].map(aa_to_smiles)
-
     # Discard invalid sequences
     result = raw.dropna(subset=["smiles"]).copy()
-
     result["source"] = path.name
-
     LOGGER.info(
         "%s: retained %d/%d valid peptides",
         path.name, len(result), len(raw)
     )
-
     return result[["sequence", "smiles", "label", "source"]]
 
 def read_pepland_nc_cpp(
@@ -270,16 +264,11 @@ def read_pepland_nc_cpp(
     target_col: str = "PAMPA",
 ) -> pd.DataFrame:
     """Load cyclic-peptide permeability regression data."""
-
     raw = pd.read_csv(path)
-
     if target_col not in raw.columns:
         raise ValueError(f"Missing column: {target_col}")
 
-    raw["label"] = pd.to_numeric(
-        raw[target_col], errors="coerce"
-    )
-
+    raw["label"] = pd.to_numeric(raw[target_col], errors="coerce")
     raw = raw.dropna(subset=["SMILES", "label"]).copy()
     raw = raw[np.isfinite(raw["label"])].copy()
 
@@ -287,16 +276,10 @@ def read_pepland_nc_cpp(
 
     for _, row in raw.iterrows():
         mol = Chem.MolFromSmiles(str(row["SMILES"]))
-
         if mol is None:
             continue
 
-        smiles = Chem.MolToSmiles(
-            mol,
-            canonical=True,
-            isomericSmiles=True,
-        )
-
+        smiles = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
         records.append({
             "sequence": str(row["Sequence"]),
             "smiles": smiles,
@@ -305,7 +288,6 @@ def read_pepland_nc_cpp(
         })
 
     frame = pd.DataFrame(records)
-
     # Aggregate repeated molecular structures.
     frame = frame.groupby(
         "smiles", as_index=False
@@ -323,37 +305,23 @@ def read_pepland_nc_cpp(
 
     return frame
 
-def merge_labeled_frames(
-    frames: list[pd.DataFrame],
-    task: str,
-) -> tuple[pd.DataFrame, int]:
+def merge_labeled_frames(frames: list[pd.DataFrame], task: str) -> tuple[pd.DataFrame, int]:
 
     combined = pd.concat(frames, ignore_index=True)
-
     # Find molecules with contradictory labels.
     label_counts = combined.groupby("smiles")["label"].nunique()
-
-    conflicts = set(
-        label_counts[label_counts > 1].index
-    )
-
+    conflicts = set(label_counts[label_counts > 1].index)
     # Drop all examples of molecules with conflicting labels.
     combined = combined[
         ~combined["smiles"].isin(conflicts)
     ]
-
     # Keep one example per molecule.
     combined = combined.drop_duplicates(
         subset="smiles"
     ).reset_index(drop=True)
-
     counts = combined["label"].value_counts()
 
-    if (
-        len(combined) < 20
-        or len(counts) != 2
-        or counts.min() < 10
-    ):
+    if len(combined) < 20 or len(counts) != 2 or counts.min() < 10:
         raise ValueError(
             f"{task}: insufficient examples per class: "
             f"{counts.to_dict()}"
@@ -361,18 +329,12 @@ def merge_labeled_frames(
 
     return combined, len(conflicts)
 
-def prepare_dataset(
-    task: str,
-    data_dir: Path,
-    encoding: str,
-    pepland_data_dir: Path,
-) -> tuple[pd.DataFrame, dict]:
+def prepare_dataset(task: str, data_dir: Path, encoding: str, pepland_data_dir: Path,) -> tuple[pd.DataFrame, dict]:
 
     frames = []
     original_stats = {}
 
     if task == "permeability":
-
         # Canonical cell-penetrating peptides
         frames.append(
             read_pepland_txt(
@@ -382,21 +344,13 @@ def prepare_dataset(
 
         # Non-canonical cell-penetrating peptides
         nc_path = pepland_data_dir / "nc-CPP.csv"
-
         if nc_path.is_file():
-            frames.append(
-                read_pepland_nc_cpp(nc_path)
-            )
-
+            frames.append(read_pepland_nc_cpp(nc_path))
     else:
         # Existing PeptideBERT data loader
-        base, original_stats = prepare_npz_dataset(
-            task, data_dir, encoding
-        )
-
+        base, original_stats = prepare_npz_dataset(task, data_dir, encoding)
         base["source"] = "peptidebert_npz"
         frames.append(base)
-
         if task == "solubility":
             frames.append(
                 read_pepland_txt(
@@ -405,10 +359,7 @@ def prepare_dataset(
             )
 
     # Deduplicate before splitting.
-    frame, n_conflicts = merge_labeled_frames(
-        frames, task
-    )
-
+    frame, n_conflicts = merge_labeled_frames(frames, task)
     stats = {
         "original_dataset": original_stats,
         "sources": frame["source"].value_counts().to_dict(),
@@ -417,7 +368,6 @@ def prepare_dataset(
         "positive_count": int(frame["label"].sum()),
         "negative_count": int((frame["label"] == 0).sum()),
     }
-
     LOGGER.info(
         "%s: %d unique molecules, %d positive, %d negative",
         task,
@@ -425,7 +375,6 @@ def prepare_dataset(
         stats["positive_count"],
         stats["negative_count"],
     )
-
     return frame, stats
 
 def stratified(y: np.ndarray, tvt=(.8, .1, .1), seed: int = 42) -> dict[str, np.ndarray]:
@@ -527,39 +476,25 @@ class ECFP4Embedder:
             "rdkit_version": rdkit.__version__,
         }
 
-    def transform(
-        self,
-        smiles: list[str],
-        batch_size: int = 256,
-    ) -> np.ndarray:
-
+    def transform(self, smiles: list[str], batch_size: int = 256) -> np.ndarray:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-
-        X = np.zeros(
-            (len(smiles), self.n_bits),
-            dtype=np.float32,
-        )
+        X = np.zeros((len(smiles), self.n_bits), dtype=np.float32)
 
         for start in range(0, len(smiles), batch_size):
             end = min(start + batch_size, len(smiles))
-
             for i in range(start, end):
                 mol = Chem.MolFromSmiles(smiles[i])
-
                 if mol is None:
                     raise ValueError(
                         f"Invalid SMILES at index {i}: {smiles[i]}"
                     )
-
                 # Count-based, NOT binary
                 X[i] = self.generator.GetCountFingerprintAsNumPy(mol)
-
         return X
 
 
-def get_features(task: str, smiles: list[str], embedder,
-                 batch_size: int, cache_dir: Path, cache: bool) -> np.ndarray:
+def get_features(task: str, smiles: list[str], embedder, batch_size: int, cache_dir: Path, cache: bool) -> np.ndarray:
     sig = json.dumps(embedder.signature, sort_keys=True).encode()
     h = hashlib.sha256(sig)
     for s in smiles:
@@ -611,8 +546,23 @@ def f1_optimal_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> float
     return float(grid[best[np.argmin(np.abs(grid[best] - 0.5))]])
 
 
-def trial_params(trial: optuna.Trial, seed: int, n_jobs: int) -> dict:
+def trial_params(trial: optuna.Trial, seed: int, n_jobs: int, *, regression: bool = False) -> dict:
     """Classification search space: PepTune paper, Table 10 (50 trials)."""
+    if regression:
+        return {
+                "objective": "reg:squarederror", "eval_metric": "rmse", "tree_method": "hist",
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0.1, 10.0, log=True),
+                "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+                "subsample": trial.suggest_float("subsample", 0.6, 0.9),
+                "learning_rate": trial.suggest_float("learning_rate", 1e-5, 0.1),
+                "max_depth": trial.suggest_int("max_depth", 2, 30),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+                # Retained to reproduce the paper's regression search space.
+                "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 10.0, log=True),
+                "seed": seed, "nthread": n_jobs, "verbosity": 0,
+            }
     return {
         "objective": "binary:logistic", "eval_metric": "logloss", "tree_method": "hist",
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10., log=True),
@@ -850,39 +800,23 @@ def train_task(task: str, args: argparse.Namespace, embedder: PepTuneEmbedder) -
 def train_permeability(args, embedder):
     folder = args.output_dir / "permeability"
     folder.mkdir(parents=True, exist_ok=True)
-
     configure_task_log(folder)
-
+    LOGGER.info("Starting permeability | seed=%s | 80/10/10 train/val/test | %s Optuna trials", args.seed, args.n_trials)
     frame = read_pepland_nc_cpp(
         args.pepland_data_dir / "nc-CPP.csv",
         target_col="PAMPA",
     )
-
     y = frame["label"].to_numpy(dtype=np.float32)
 
     # 80/10/10 split, after molecular deduplication.
     indices = np.arange(len(frame))
 
-    train_val, test = train_test_split(
-        indices, test_size=0.1, random_state=args.seed
-    )
-
-    train, val = train_test_split(
-        train_val,
-        test_size=1 / 9,
-        random_state=args.seed,
-    )
-
-    splits = {
-        "train": train,
-        "val": val,
-        "test": test,
-    }
-
+    train_val, test = train_test_split(indices, test_size=0.1, random_state=args.seed)
+    train, val = train_test_split(train_val, test_size=1/9, random_state=args.seed)
+    splits = {"train": train, "val": val, "test": test}
     frame["split"] = ""
     for name, idx in splits.items():
         frame.loc[idx, "split"] = name
-
     frame.to_csv(folder / "split_manifest.csv", index=False)
 
     X = get_features(
@@ -901,7 +835,6 @@ def train_permeability(args, embedder):
 
     def fit_regression(params):
         history = {}
-
         booster = xgb.train(
             params,
             dm["train"],
@@ -921,40 +854,27 @@ def train_permeability(args, embedder):
             ],
             verbose_eval=False,
         )
-
         return booster, history
 
     def objective(trial):
-        params = trial_params(
-            trial, args.seed, args.n_jobs
-        )
-
-        params.update({
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-        })
-
-        booster, _ = fit_regression(params)
-
+        params = trial_params(trial, args.seed, args.n_jobs, regression=True)
+        booster, hist = fit_regression(params)
         pred = booster.predict(dm["val"])
-
-        rmse = float(np.sqrt(
-            mean_squared_error(y[val], pred)
-        ))
-
+        rmse = float(np.sqrt(mean_squared_error(y[val], pred)))
+        trial.set_user_attr("best_iteration", int(booster.best_iteration))
+        trial.set_user_attr("val_rmse", rmse)
+        trial.set_user_attr("num_trained_rounds", len(hist["train"]["rmse"]))
+        LOGGER.info("Trial %03d / %03d | val RMSE=%.5f | n_trees=%d",
+                    trial.number + 1, args.n_trials, rmse,
+                    int(booster.best_iteration) + 1)
         return rmse
 
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(
-            seed=args.seed
-        ),
+        study_name="permeability_80_10_10",
+        sampler=optuna.samplers.TPESampler(seed=args.seed),
     )
-
-    study.optimize(
-        objective,
-        n_trials=args.n_trials,
-    )
+    study.optimize(objective, n_trials=args.n_trials, show_progress_bar=False)
 
     params = {
         "objective": "reg:squarederror",
@@ -970,38 +890,18 @@ def train_permeability(args, embedder):
 
     model_path = folder / "permeability-xgboost.json"
     booster.save_model(str(model_path))
-
-    from sklearn.metrics import (
-        mean_absolute_error,
-        r2_score,
-    )
-
     metrics = {}
-
     for name, idx in splits.items():
         pred = booster.predict(dm[name])
-
         metrics[name] = {
-            "rmse": float(np.sqrt(
-                mean_squared_error(y[idx], pred)
-            )),
-            "mae": float(
-                mean_absolute_error(y[idx], pred)
-            ),
-            "r2": float(
-                r2_score(y[idx], pred)
-            ),
-            "spearman": float(
-                spearmanr(y[idx], pred).statistic
-            ),
+            "rmse": float(np.sqrt(mean_squared_error(y[idx], pred))),
+            "mae": float(mean_absolute_error(y[idx], pred)),
+            "r2": float(r2_score(y[idx], pred)),
+            "spearman": float(spearmanr(y[idx], pred).statistic),
         }
 
-        result = frame.loc[
-            idx, ["smiles", "label", "source"]
-        ].copy()
-
+        result = frame.loc[idx, ["smiles", "label", "source"]].copy()
         result["predicted_permeability"] = pred
-
         result.to_csv(
             folder / f"{name}_predictions.csv",
             index=False,
@@ -1013,15 +913,17 @@ def train_permeability(args, embedder):
     write_json(folder / "best_params.json", {
         "params": params,
         "best_trial": study.best_trial.number,
+        "n_trials": len(study.trials),
+        "best_validation_rmse": study.best_value,
+        "selection_metric": "validation RMSE",
+        "validation_early_stopping_metric": "rmse",
+        "search_space_source": "https://arxiv.org/html/2412.17780v3#A3.SS4",
         "best_iteration": int(booster.best_iteration),
         "target": "PAMPA",
         "objective": "reg:squarederror",
     })
 
-    study.trials_dataframe().to_csv(
-        folder / "optuna_trials.csv", index=False
-    )
-
+    study.trials_dataframe().to_csv(folder / "optuna_trials.csv", index=False)
     pd.DataFrame({
         "train_rmse": history["train"]["rmse"],
         "val_rmse": history["val"]["rmse"],
@@ -1053,7 +955,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--threshold-mode", choices=["paper", "validation_f1"],
                    default="validation_f1", help="Choose positive-class cutoff on validation (recommended), or use paper cutoff")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--n-jobs", type=int, default=4, help="CPU threads for XGBoost")
+    p.add_argument("--n-jobs", type=int, default=16, help="CPU threads for XGBoost")
     p.add_argument("--no-cache", action="store_true", help="Do not save/read embedding cache")
     p.add_argument("--install-classifiers", action="store_true",
                    help="Opt-in copy to src/scoring/functions/classifiers; backs up prior files")
@@ -1073,7 +975,7 @@ def main(argv: list[str] | None = None) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if not args.data_dir.is_dir():
         raise FileNotFoundError(f"Data directory does not exist: {args.data_dir}")
-    # Load once so the frozen feature encoder is shared among all three heads.
+    # Load once so the frozen feature encoder is shared among all four heads.
     LOGGER.addHandler(logging.StreamHandler(sys.stdout))
     LOGGER.setLevel(logging.INFO)
     embedder = ECFP4Embedder(n_bits=1024, include_chirality=False) if args.ecfp4 else PepTuneEmbedder(args.repo_root, args.model_id, args.device, args.max_tokens)
